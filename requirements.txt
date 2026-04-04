@@ -1,0 +1,23 @@
+# Core Discord
+discord.py>=2.5.2
+aiohttp>=3.11.18
+
+# HTTP & networking
+requests>=2.32.3
+aiohttp-socks>=0.10.1
+certifi>=2025.4.26
+
+# Environment & config
+python-dotenv>=1.1.0
+
+# Terminal colours
+colorama>=0.4.6
+
+# CAPTCHA solver (Whiteout Survival gift code redemption)
+onnxruntime>=1.18.1
+pillow>=10.4.0
+numpy>=2.4.0
+
+# Utilities
+pytz>=2025.2
+setuptools>=80.3.1
