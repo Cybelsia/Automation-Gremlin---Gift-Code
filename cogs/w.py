@@ -148,4 +148,4 @@ class WCommand(commands.Cog):
 
 
 async def setup(bot):
-    await bot.add_cog(WCommand(bot))
+    await bot.add_cog(WCommand(bot))
