@@ -12,10 +12,7 @@ def load_token() -> str:
     token = os.getenv("DISCORD_TOKEN")
     if token and token.strip():
         return token.strip()
-
-    raise RuntimeError(
-        "DISCORD_TOKEN is missing. Add it to your Railway variables."
-    )
+    raise RuntimeError("DISCORD_TOKEN is missing in Railway variables.")
 
 
 def ensure_folders():
@@ -140,13 +137,12 @@ class GremlinBot(commands.Bot):
 
 bot = GremlinBot(command_prefix="!", intents=intents)
 
-
 COGS = [
-    "cogs.control",
     "cogs.alliance",
     "cogs.alliance_member_operations",
     "cogs.bot_operations",
     "cogs.changes",
+    "cogs.control",
     "cogs.gift_operations",
     "cogs.id_channel",
     "cogs.logsystem",
@@ -206,4 +202,24 @@ def run_bot():
         bot_task = asyncio.create_task(start_bot())
         stop_task = asyncio.create_task(stop_event.wait())
 
-        
+        done, pending = await asyncio.wait(
+            {bot_task, stop_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        for task in pending:
+            task.cancel()
+
+        if stop_task in done and not bot.is_closed():
+            await bot.close()
+
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    try:
+        loop.run_until_complete(runner())
+    finally:
+        loop.close()
+
+
+if __name__ == "__main__":
+    run_bot()
