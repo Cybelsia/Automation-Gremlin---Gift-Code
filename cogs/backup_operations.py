@@ -12,6 +12,7 @@ import tempfile
 import shutil
 import traceback
 import ssl
+from cogs.permissions import check_permission
 
 class BackupOperations(commands.Cog):
     def __init__(self, bot):
@@ -45,20 +46,17 @@ class BackupOperations(commands.Cog):
 
     @tasks.loop(hours=3)
     async def automatic_backup_loop(self):
-        try:
-            conn = sqlite3.connect("db/settings.sqlite")
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM admin WHERE is_initial = 1")
-            global_admins = cursor.fetchall()
-            conn.close()
-        except:
-            pass
+        pass
 
     @automatic_backup_loop.before_loop
     async def before_automatic_backup(self):
         await self.bot.wait_until_ready()
 
     async def show_backup_menu(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ You don't have permission to use backup operations.", ephemeral=True)
+            return
+
         embed = discord.Embed(
             title="💾 Backup System",
             description=(
