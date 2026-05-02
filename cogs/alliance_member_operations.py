@@ -81,11 +81,13 @@ class AllianceMemberOperations(commands.Cog):
             async with session.post('https://wos-giftcode-api.centurygame.com/api/player', headers=headers, data=form) as response:
                 response_text = await response.text()
                 if response.status != 200:
+                    print(f"[ERROR] Player API failed fid={fid} status={response.status} response_body={response_text}")
                     raise RuntimeError(f"Player API returned HTTP {response.status}: {response_text}")
 
                 data = await response.json()
                 player_data = data.get('data')
                 if not player_data:
+                    print(f"[ERROR] Player API returned no data fid={fid} response_body={response_text}")
                     raise RuntimeError(f"Player API returned no player data: {data}")
 
                 return player_data
@@ -316,7 +318,7 @@ class AddAllianceMemberModal(discord.ui.Modal, title="Add Alliance Member"):
             )
         except Exception as e:
             print(f"[ERROR] Failed to add alliance member fid={fid_value} discord_id={discord_id_value}: {e}")
-            traceback.print_exc()
+            traceback.print_exception(type(e), e, e.__traceback__)
             await interaction.followup.send("❌ Failed to fetch or save player information.", ephemeral=True)
 
 async def setup(bot):
