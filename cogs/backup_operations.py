@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 import asyncio
 import tempfile
 import shutil
-import pyzipper
 import traceback
 import ssl
 
@@ -58,6 +57,36 @@ class BackupOperations(commands.Cog):
     @automatic_backup_loop.before_loop
     async def before_automatic_backup(self):
         await self.bot.wait_until_ready()
+
+    async def show_backup_menu(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="💾 Backup System",
+            description=(
+                "Backup system is loaded.\n\n"
+                "**Available Operations**\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "🏠 **Main Menu**\n"
+                "└ Return to settings\n"
+                "━━━━━━━━━━━━━━━━━━━━━━"
+            ),
+            color=discord.Color.blue()
+        )
+        view = BackupMenuView(self)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class BackupMenuView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=0)
+    async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        alliance_cog = self.cog.bot.get_cog("Alliance")
+        if alliance_cog:
+            await alliance_cog.show_main_menu(interaction)
+        else:
+            await interaction.response.send_message("❌ Settings menu not found.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(BackupOperations(bot))

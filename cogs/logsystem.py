@@ -38,6 +38,74 @@ class LogSystem(commands.Cog):
         except:
             pass
 
+    async def show_log_system_menu(self, interaction: discord.Interaction):
+        try:
+            self.settings_cursor.execute("SELECT is_initial FROM admin WHERE id = ?", (interaction.user.id,))
+            result = self.settings_cursor.fetchone()
+            
+            if not result or result[0] != 1:
+                await interaction.response.send_message(
+                    "❌ Only global administrators can access the log system.", 
+                    ephemeral=True
+                )
+                return
+
+            log_embed = discord.Embed(
+                title="📋 Alliance Log System",
+                description=(
+                    "Select an option to manage alliance logs:\n\n"
+                    "**Available Options**\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "📝 **Set Log Channel**\n"
+                    "└ Assign a log channel to an alliance\n\n"
+                    "🗑️ **Remove Log Channel**\n"
+                    "└ Remove alliance log channel\n\n"
+                    "📊 **View Log Channels**\n"
+                    "└ List all alliance log channels\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━"
+                ),
+                color=discord.Color.blue()
+            )
+
+            view = discord.ui.View()
+            view.add_item(discord.ui.Button(
+                label="Set Log Channel",
+                emoji="📝",
+                style=discord.ButtonStyle.primary,
+                custom_id="set_log_channel",
+                row=0
+            ))
+            view.add_item(discord.ui.Button(
+                label="Remove Log Channel",
+                emoji="🗑️",
+                style=discord.ButtonStyle.danger,
+                custom_id="remove_log_channel",
+                row=0
+            ))
+            view.add_item(discord.ui.Button(
+                label="View Log Channels",
+                emoji="📊",
+                style=discord.ButtonStyle.secondary,
+                custom_id="view_log_channels",
+                row=1
+            ))
+            view.add_item(discord.ui.Button(
+                label="Back",
+                emoji="◀️",
+                style=discord.ButtonStyle.secondary,
+                custom_id="bot_operations",
+                row=2
+            ))
+
+            await interaction.response.edit_message(embed=log_embed, view=view)
+        except Exception as e:
+            print(f"Error in log system menu: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ An error occurred while accessing the log system.",
+                    ephemeral=True
+                )
+
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
         if not interaction.type == discord.InteractionType.component:
@@ -46,76 +114,21 @@ class LogSystem(commands.Cog):
         custom_id = interaction.data.get("custom_id", "")
         
         if custom_id == "log_system":
-            try:
-                self.settings_cursor.execute("SELECT is_initial FROM admin WHERE id = ?", (interaction.user.id,))
-                result = self.settings_cursor.fetchone()
-                
-                if not result or result[0] != 1:
-                    await interaction.response.send_message(
-                        "❌ Only global administrators can access the log system.", 
-                        ephemeral=True
-                    )
-                    return
+            await self.show_log_system_menu(interaction)
 
-                log_embed = discord.Embed(
-                    title="📋 Alliance Log System",
-                    description=(
-                        "Select an option to manage alliance logs:\n\n"
-                        "**Available Options**\n"
-                        "━━━━━━━━━━━━━━━━━━━━━━\n"
-                        "📝 **Set Log Channel**\n"
-                        "└ Assign a log channel to an alliance\n\n"
-                        "🗑️ **Remove Log Channel**\n"
-                        "└ Remove alliance log channel\n\n"
-                        "📊 **View Log Channels**\n"
-                        "└ List all alliance log channels\n"
-                        "━━━━━━━━━━━━━━━━━━━━━━"
-                    ),
-                    color=discord.Color.blue()
-                )
+        elif custom_id == "bot_operations":
+            bot_operations_cog = self.bot.get_cog("BotOperations")
+            if bot_operations_cog:
+                await bot_operations_cog.show_bot_operations_menu(interaction)
+            else:
+                await interaction.response.send_message("❌ Bot Operations module not found.", ephemeral=True)
 
-                view = discord.ui.View()
-                view.add_item(discord.ui.Button(
-                    label="Set Log Channel",
-                    emoji="📝",
-                    style=discord.ButtonStyle.primary,
-                    custom_id="set_log_channel",
-                    row=0
-                ))
-                view.add_item(discord.ui.Button(
-                    label="Remove Log Channel",
-                    emoji="🗑️",
-                    style=discord.ButtonStyle.danger,
-                    custom_id="remove_log_channel",
-                    row=0
-                ))
-                view.add_item(discord.ui.Button(
-                    label="View Log Channels",
-                    emoji="📊",
-                    style=discord.ButtonStyle.secondary,
-                    custom_id="view_log_channels",
-                    row=1
-                ))
-                view.add_item(discord.ui.Button(
-                    label="Back",
-                    emoji="◀️",
-                    style=discord.ButtonStyle.secondary,
-                    custom_id="bot_operations",
-                    row=2
-                ))
-
-                await interaction.response.send_message(
-                    embed=log_embed,
-                    view=view,
-                    ephemeral=True
-                )
-
-            except Exception as e:
-                print(f"Error in log system menu: {e}")
-                await interaction.response.send_message(
-                    "❌ An error occurred while accessing the log system.",
-                    ephemeral=True
-                )
+        elif custom_id == "main_menu":
+            alliance_cog = self.bot.get_cog("Alliance")
+            if alliance_cog:
+                await alliance_cog.show_main_menu(interaction)
+            else:
+                await interaction.response.send_message("❌ Settings menu not found.", ephemeral=True)
 
         elif custom_id == "set_log_channel":
             try:

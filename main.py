@@ -151,6 +151,10 @@ COGS = [
     "cogs.gift_operations",
     "cogs.id_channel",
     "cogs.logsystem",
+    "cogs.other_features",
+    "cogs.support_operations",
+    "cogs.backup_operations",
+    "cogs.bear_trap",
     "cogs.w",
     "cogs.wel",
 ]

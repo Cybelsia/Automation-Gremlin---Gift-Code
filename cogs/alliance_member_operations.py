@@ -48,11 +48,20 @@ class AllianceMemberOperations(commands.Cog):
     async def handle_member_operations(self, interaction: discord.Interaction):
         embed = discord.Embed(
             title="👥 Alliance Member Operations",
-            description="Please select an operation from below.",
+            description=(
+                "Please select an operation from below.\n\n"
+                "**Available Operations**\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "📋 **Select Alliance**\n"
+                "└ Choose from alliances available to you\n\n"
+                "🏠 **Main Menu**\n"
+                "└ Return to settings\n"
+                "━━━━━━━━━━━━━━━━━━━━━━"
+            ),
             color=discord.Color.blue()
         )
         
-        view = discord.ui.View()
+        view = MemberOperationsView(self)
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def get_admin_alliances(self, user_id: int, guild_id: int):
@@ -66,6 +75,28 @@ class AllianceSelectView(discord.ui.View):
         self.page = page
         self.current_select = None
         self.callback = None
+
+
+class MemberOperationsView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    @discord.ui.button(label="Select Alliance", emoji="📋", style=discord.ButtonStyle.primary, row=0)
+    async def select_alliance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        alliances, _, _ = await self.cog.get_admin_alliances(interaction.user.id, interaction.guild_id)
+        if not alliances:
+            await interaction.response.send_message("❌ No alliances available for this operation.", ephemeral=True)
+            return
+        await interaction.response.send_message("Alliance selection is not configured for this operation yet.", ephemeral=True)
+
+    @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=1)
+    async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        alliance_cog = self.cog.bot.get_cog("Alliance")
+        if alliance_cog:
+            await alliance_cog.show_main_menu(interaction)
+        else:
+            await interaction.response.send_message("❌ Settings menu not found.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(AllianceMemberOperations(bot))
