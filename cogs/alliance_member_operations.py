@@ -67,18 +67,22 @@ class AllianceMemberOperations(commands.Cog):
         self.conn_users.commit()
 
     async def fetch_player_info(self, fid: int):
-        current_time = int(time.time() * 1000)
-        form = f"fid={fid}&time={current_time}"
+        time_val = int(datetime.now().timestamp())
+        form = f"fid={fid}&time={time_val}"
         sign = hashlib.md5((form + SECRET).encode('utf-8')).hexdigest()
-        form = f"sign={sign}&{form}"
-        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+        form_data = {"sign": sign, "fid": str(fid), "time": str(time_val)}
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/x-www-form-urlencoded",
+            "origin": "https://wos-giftcode.centurygame.com"
+        }
 
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
 
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
-            async with session.post('https://wos-giftcode-api.centurygame.com/api/player', headers=headers, data=form) as response:
+            async with session.post('https://wos-giftcode-api.centurygame.com/api/player', headers=headers, data=form_data) as response:
                 response_text = await response.text()
                 if response.status != 200:
                     print(f"[ERROR] Player API failed fid={fid} status={response.status} response_body={response_text}")

@@ -6,6 +6,7 @@ import ssl
 import time
 import asyncio
 import sqlite3
+from datetime import datetime
 
 class WCommand(commands.Cog):
     def __init__(self, bot):
@@ -65,13 +66,17 @@ class WCommand(commands.Cog):
         try:
             await interaction.response.defer(thinking=True)
             
-            current_time = int(time.time() * 1000)
-            form = f"fid={fid}&time={current_time}"
+            time_val = int(datetime.now().timestamp())
+            form = f"fid={fid}&time={time_val}"
             sign = hashlib.md5((form + self.SECRET).encode('utf-8')).hexdigest()
-            form = f"sign={sign}&{form}"
+            form_data = {"sign": sign, "fid": str(fid), "time": str(time_val)}
 
             url = 'https://wos-giftcode-api.centurygame.com/api/player'
-            headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+            headers = {
+                "accept": "application/json, text/plain, */*",
+                "content-type": "application/x-www-form-urlencoded",
+                "origin": "https://wos-giftcode.centurygame.com"
+            }
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
@@ -81,7 +86,7 @@ class WCommand(commands.Cog):
 
             for attempt in range(max_retries):
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(url, headers=headers, data=form, ssl=ssl_context) as response:
+                    async with session.post(url, headers=headers, data=form_data, ssl=ssl_context) as response:
                         if response.status == 200:
                             data = await response.json()
                             nickname = data['data']['nickname']
@@ -148,4 +153,4 @@ class WCommand(commands.Cog):
 
 
 async def setup(bot):
-    await bot.add_cog(WCommand(bot))
+    await bot.add_cog(WCommand(bot))
