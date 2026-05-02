@@ -240,6 +240,17 @@ class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
                 (name, interaction.guild_id)
             )
             self.cog.conn.commit()
+            print(f"[DEBUG] Added alliance guild_id={interaction.guild_id} name={name}")
+            self.cog.c.execute(
+                """
+                SELECT alliance_id, name, discord_server_id
+                FROM alliance_list
+                WHERE name = ? AND discord_server_id = ?
+                """,
+                (name, interaction.guild_id)
+            )
+            saved_row = self.cog.c.fetchone()
+            print(f"[DEBUG] Confirm saved alliance row={saved_row}")
             embed = discord.Embed(
                 title="✅ Alliance Added",
                 description=f"Successfully added alliance `{name}`.",

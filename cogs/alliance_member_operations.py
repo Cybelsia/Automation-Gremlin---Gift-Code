@@ -85,6 +85,7 @@ class AllianceMemberOperations(commands.Cog):
             ORDER BY name
         """, (guild_id,))
         alliances = self.c_alliance.fetchall()
+        print(f"[DEBUG] get_admin_alliances guild_id={guild_id} raw_results={alliances}")
 
         alliances_with_counts = []
         for alliance_id, name in alliances:
