@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 import sqlite3  
 import asyncio
+import traceback
 from datetime import datetime
 from cogs.permissions import check_permission
 
@@ -130,7 +131,14 @@ class Alliance(commands.Cog):
             await interaction.response.send_message("❌ An error occurred while loading alliances.", ephemeral=True)
 
     async def show_add_alliance_modal(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(AddAllianceModal(self))
+        try:
+            print(f"[DEBUG] Opening AddAllianceModal guild_id={interaction.guild_id} user_id={interaction.user.id}")
+            await interaction.response.send_modal(AddAllianceModal(self))
+        except Exception as e:
+            print(f"[ERROR] Failed to open AddAllianceModal: {e}")
+            traceback.print_exc()
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ An error occurred while opening the alliance modal.", ephemeral=True)
 
 
 class SettingsMenuView(discord.ui.View):
@@ -201,6 +209,7 @@ class AllianceOperationsView(discord.ui.View):
 
     @discord.ui.button(label="Add New Alliance", emoji="➕", style=discord.ButtonStyle.success, row=0)
     async def add_alliance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        print(f"[DEBUG] Add New Alliance button clicked guild_id={interaction.guild_id} user_id={interaction.user.id}")
         await self.cog.show_add_alliance_modal(interaction)
 
     @discord.ui.button(label="View Alliances", emoji="📋", style=discord.ButtonStyle.primary, row=0)
@@ -225,6 +234,7 @@ class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
 
     async def on_submit(self, interaction: discord.Interaction):
         name = str(self.alliance_name.value).strip()
+        print(f"[DEBUG] AddAllianceModal submitted guild_id={interaction.guild_id} user_id={interaction.user.id} name={name}")
 
         if not name:
             await interaction.response.send_message("❌ Alliance name is required.", ephemeral=True)
@@ -258,10 +268,20 @@ class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
             )
             embed.add_field(name="Discord Server ID", value=f"`{interaction.guild_id}`", inline=False)
             await interaction.response.send_message(embed=embed, ephemeral=True)
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as e:
+            print(f"[ERROR] Alliance INSERT integrity error guild_id={interaction.guild_id} name={name}: {e}")
+            traceback.print_exc()
             await interaction.response.send_message("❌ An alliance with that name already exists.", ephemeral=True)
         except Exception as e:
+            print(f"[ERROR] Alliance INSERT failed guild_id={interaction.guild_id} name={name}: {e}")
+            traceback.print_exc()
             await interaction.response.send_message("❌ An error occurred while adding the alliance.", ephemeral=True)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        print(f"[ERROR] AddAllianceModal.on_error guild_id={interaction.guild_id} user_id={interaction.user.id}: {error}")
+        traceback.print_exception(type(error), error, error.__traceback__)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("❌ An error occurred while submitting the alliance modal.", ephemeral=True)
 
 class PaginatedChannelView(discord.ui.View):
     def __init__(self, channels, original_callback):

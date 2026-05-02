@@ -9,6 +9,9 @@ class GNCommands(commands.Cog):
         self.bot = bot
         self.conn = sqlite3.connect('db/settings.sqlite')
         self.c = self.conn.cursor()
+        self.c.execute("CREATE TABLE IF NOT EXISTS auto (value INTEGER NOT NULL DEFAULT 1)")
+        self.c.execute("INSERT INTO auto (value) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM auto)")
+        self.conn.commit()
 
     def cog_unload(self):
         if hasattr(self, 'conn'):
