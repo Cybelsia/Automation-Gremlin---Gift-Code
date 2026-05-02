@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime
 from .alliance_member_operations import AllianceSelectView
 from .alliance import PaginatedChannelView
+from cogs.permissions import check_permission
 
 class LogSystem(commands.Cog):
     def __init__(self, bot):
@@ -40,12 +41,9 @@ class LogSystem(commands.Cog):
 
     async def show_log_system_menu(self, interaction: discord.Interaction):
         try:
-            self.settings_cursor.execute("SELECT is_initial FROM admin WHERE id = ?", (interaction.user.id,))
-            result = self.settings_cursor.fetchone()
-            
-            if not result or result[0] != 1:
+            if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
                 await interaction.response.send_message(
-                    "❌ Only global administrators can access the log system.", 
+                    "❌ Only server admins can access the log system.", 
                     ephemeral=True
                 )
                 return
@@ -132,12 +130,9 @@ class LogSystem(commands.Cog):
 
         elif custom_id == "set_log_channel":
             try:
-                self.settings_cursor.execute("SELECT is_initial FROM admin WHERE id = ?", (interaction.user.id,))
-                result = self.settings_cursor.fetchone()
-                
-                if not result or result[0] != 1:
+                if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
                     await interaction.response.send_message(
-                        "❌ Only global administrators can set log channels.", 
+                        "❌ Only server admins can set log channels.", 
                         ephemeral=True
                     )
                     return
@@ -271,12 +266,9 @@ class LogSystem(commands.Cog):
 
         elif custom_id == "remove_log_channel":
             try:
-                self.settings_cursor.execute("SELECT is_initial FROM admin WHERE id = ?", (interaction.user.id,))
-                result = self.settings_cursor.fetchone()
-                
-                if not result or result[0] != 1:
+                if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
                     await interaction.response.send_message(
-                        "❌ Only global administrators can remove log channels.", 
+                        "❌ Only server admins can remove log channels.", 
                         ephemeral=True
                     )
                     return
@@ -450,12 +442,9 @@ class LogSystem(commands.Cog):
 
         elif custom_id == "view_log_channels":
             try:
-                self.settings_cursor.execute("SELECT is_initial FROM admin WHERE id = ?", (interaction.user.id,))
-                result = self.settings_cursor.fetchone()
-                
-                if not result or result[0] != 1:
+                if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
                     await interaction.response.send_message(
-                        "❌ Only global administrators can view log channels.", 
+                        "❌ Only server admins can view log channels.", 
                         ephemeral=True
                     )
                     return
