@@ -70,23 +70,20 @@ class AllianceMemberOperations(commands.Cog):
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def get_admin_alliances(self, user_id: int, guild_id: int):
+        if guild_id is None:
+            return [], [], False
+
         if not check_permission(user_id, guild_id, "mod"):
             return [], [], False
 
-        self.c_alliance.execute("PRAGMA table_info(alliance_list)")
-        columns = [column[1] for column in self.c_alliance.fetchall()]
-        has_discord_server_id = "discord_server_id" in columns
         is_admin = check_permission(user_id, guild_id, "admin")
 
-        if has_discord_server_id:
-            self.c_alliance.execute("""
-                SELECT alliance_id, name
-                FROM alliance_list
-                WHERE discord_server_id IS NULL OR discord_server_id = ?
-                ORDER BY name
-            """, (guild_id,))
-        else:
-            self.c_alliance.execute("SELECT alliance_id, name FROM alliance_list ORDER BY name")
+        self.c_alliance.execute("""
+            SELECT alliance_id, name
+            FROM alliance_list
+            WHERE discord_server_id = ?
+            ORDER BY name
+        """, (guild_id,))
         alliances = self.c_alliance.fetchall()
 
         alliances_with_counts = []

@@ -100,7 +100,19 @@ class Alliance(commands.Cog):
 
     async def show_alliances(self, interaction: discord.Interaction):
         try:
-            self.c.execute("SELECT alliance_id, name, discord_server_id FROM alliance_list ORDER BY name")
+            if interaction.guild_id is None:
+                await interaction.response.send_message("❌ This can only be used in a server.", ephemeral=True)
+                return
+
+            self.c.execute(
+                """
+                SELECT alliance_id, name, discord_server_id
+                FROM alliance_list
+                WHERE discord_server_id = ?
+                ORDER BY name
+                """,
+                (interaction.guild_id,)
+            )
             alliances = self.c.fetchall()
             if not alliances:
                 await interaction.response.send_message("❌ No alliances found.", ephemeral=True)
@@ -206,12 +218,6 @@ class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
         placeholder="Enter alliance name",
         max_length=100
     )
-    discord_server_id = discord.ui.TextInput(
-        label="Discord Server ID",
-        placeholder="Optional",
-        required=False,
-        max_length=20
-    )
 
     def __init__(self, cog):
         super().__init__()
@@ -219,23 +225,19 @@ class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
 
     async def on_submit(self, interaction: discord.Interaction):
         name = str(self.alliance_name.value).strip()
-        server_id_value = str(self.discord_server_id.value).strip()
 
         if not name:
             await interaction.response.send_message("❌ Alliance name is required.", ephemeral=True)
             return
 
-        discord_server_id = None
-        if server_id_value:
-            if not server_id_value.isdigit():
-                await interaction.response.send_message("❌ Discord Server ID must be numeric.", ephemeral=True)
-                return
-            discord_server_id = int(server_id_value)
+        if interaction.guild_id is None:
+            await interaction.response.send_message("❌ This can only be used in a server.", ephemeral=True)
+            return
 
         try:
             self.cog.c.execute(
                 "INSERT INTO alliance_list (name, discord_server_id) VALUES (?, ?)",
-                (name, discord_server_id)
+                (name, interaction.guild_id)
             )
             self.cog.conn.commit()
             embed = discord.Embed(
@@ -243,8 +245,7 @@ class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
                 description=f"Successfully added alliance `{name}`.",
                 color=discord.Color.green()
             )
-            if discord_server_id:
-                embed.add_field(name="Discord Server ID", value=f"`{discord_server_id}`", inline=False)
+            embed.add_field(name="Discord Server ID", value=f"`{interaction.guild_id}`", inline=False)
             await interaction.response.send_message(embed=embed, ephemeral=True)
         except sqlite3.IntegrityError:
             await interaction.response.send_message("❌ An alliance with that name already exists.", ephemeral=True)
