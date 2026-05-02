@@ -10,6 +10,7 @@ from typing import List
 from datetime import datetime
 import os
 import ssl
+from cogs.permissions import check_permission
 
 SECRET = 'tB87#kPtkxqOS2'
 
@@ -69,66 +70,32 @@ class AllianceMemberOperations(commands.Cog):
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def get_admin_alliances(self, user_id: int, guild_id: int):
+        if not check_permission(user_id, guild_id, "mod"):
+            return [], [], False
+
         self.c_alliance.execute("PRAGMA table_info(alliance_list)")
         columns = [column[1] for column in self.c_alliance.fetchall()]
         has_discord_server_id = "discord_server_id" in columns
+        is_admin = check_permission(user_id, guild_id, "admin")
 
-        settings_conn = sqlite3.connect('db/settings.sqlite')
-        settings_cursor = settings_conn.cursor()
+        if has_discord_server_id:
+            self.c_alliance.execute("""
+                SELECT alliance_id, name
+                FROM alliance_list
+                WHERE discord_server_id IS NULL OR discord_server_id = ?
+                ORDER BY name
+            """, (guild_id,))
+        else:
+            self.c_alliance.execute("SELECT alliance_id, name FROM alliance_list ORDER BY name")
+        alliances = self.c_alliance.fetchall()
 
-        try:
-            settings_cursor.execute("SELECT is_initial FROM admin WHERE id = ?", (user_id,))
-            admin_result = settings_cursor.fetchone()
-            is_global_admin = bool(admin_result and admin_result[0] == 1)
+        alliances_with_counts = []
+        for alliance_id, name in alliances:
+            self.c_users.execute("SELECT COUNT(*) FROM users WHERE alliance = ?", (alliance_id,))
+            member_count = self.c_users.fetchone()[0]
+            alliances_with_counts.append((alliance_id, name, member_count))
 
-            if is_global_admin:
-                if has_discord_server_id:
-                    self.c_alliance.execute("""
-                        SELECT alliance_id, name
-                        FROM alliance_list
-                        WHERE discord_server_id IS NULL OR discord_server_id = ?
-                        ORDER BY name
-                    """, (guild_id,))
-                else:
-                    self.c_alliance.execute("SELECT alliance_id, name FROM alliance_list ORDER BY name")
-                alliances = self.c_alliance.fetchall()
-            else:
-                settings_cursor.execute("""
-                    SELECT alliances_id
-                    FROM adminserver
-                    WHERE admin = ?
-                """, (user_id,))
-                alliance_ids = [row[0] for row in settings_cursor.fetchall()]
-                if not alliance_ids:
-                    return [], [], False
-
-                placeholders = ",".join("?" for _ in alliance_ids)
-                if has_discord_server_id:
-                    self.c_alliance.execute(f"""
-                        SELECT alliance_id, name
-                        FROM alliance_list
-                        WHERE alliance_id IN ({placeholders})
-                        AND (discord_server_id IS NULL OR discord_server_id = ?)
-                        ORDER BY name
-                    """, (*alliance_ids, guild_id))
-                else:
-                    self.c_alliance.execute(f"""
-                        SELECT alliance_id, name
-                        FROM alliance_list
-                        WHERE alliance_id IN ({placeholders})
-                        ORDER BY name
-                    """, alliance_ids)
-                alliances = self.c_alliance.fetchall()
-
-            alliances_with_counts = []
-            for alliance_id, name in alliances:
-                self.c_users.execute("SELECT COUNT(*) FROM users WHERE alliance = ?", (alliance_id,))
-                member_count = self.c_users.fetchone()[0]
-                alliances_with_counts.append((alliance_id, name, member_count))
-
-            return alliances_with_counts, alliances, is_global_admin
-        finally:
-            settings_conn.close()
+        return alliances_with_counts, alliances, is_admin
 
     async def show_alliance_select(self, interaction: discord.Interaction, operation: str = "view"):
         alliances, _, _ = await self.get_admin_alliances(interaction.user.id, interaction.guild_id)
