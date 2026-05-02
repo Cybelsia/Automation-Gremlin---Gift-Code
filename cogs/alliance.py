@@ -89,6 +89,8 @@ class Alliance(commands.Cog):
                     "Please choose an alliance operation:\n\n"
                     "**Available Operations**\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "➕ **Add New Alliance**\n"
+                    "└ Register a new alliance\n\n"
                     "📋 **View Alliances**\n"
                     "└ List registered alliances\n\n"
                     "🏠 **Main Menu**\n"
@@ -121,6 +123,9 @@ class Alliance(commands.Cog):
             await interaction.response.send_message(embed=embed, ephemeral=True)
         except Exception as e:
             await interaction.response.send_message("❌ An error occurred while loading alliances.", ephemeral=True)
+
+    async def show_add_alliance_modal(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(AddAllianceModal(self))
 
 
 class SettingsMenuView(discord.ui.View):
@@ -189,6 +194,10 @@ class AllianceOperationsView(discord.ui.View):
         super().__init__(timeout=300)
         self.cog = cog
 
+    @discord.ui.button(label="Add New Alliance", emoji="➕", style=discord.ButtonStyle.success, row=0)
+    async def add_alliance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_add_alliance_modal(interaction)
+
     @discord.ui.button(label="View Alliances", emoji="📋", style=discord.ButtonStyle.primary, row=0)
     async def view_alliances_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_alliances(interaction)
@@ -196,6 +205,58 @@ class AllianceOperationsView(discord.ui.View):
     @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=1)
     async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_main_menu(interaction)
+
+
+class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
+    alliance_name = discord.ui.TextInput(
+        label="Alliance Name",
+        placeholder="Enter alliance name",
+        max_length=100
+    )
+    discord_server_id = discord.ui.TextInput(
+        label="Discord Server ID",
+        placeholder="Optional",
+        required=False,
+        max_length=20
+    )
+
+    def __init__(self, cog):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = str(self.alliance_name.value).strip()
+        server_id_value = str(self.discord_server_id.value).strip()
+
+        if not name:
+            await interaction.response.send_message("❌ Alliance name is required.", ephemeral=True)
+            return
+
+        discord_server_id = None
+        if server_id_value:
+            if not server_id_value.isdigit():
+                await interaction.response.send_message("❌ Discord Server ID must be numeric.", ephemeral=True)
+                return
+            discord_server_id = int(server_id_value)
+
+        try:
+            self.cog.c.execute(
+                "INSERT INTO alliance_list (name, discord_server_id) VALUES (?, ?)",
+                (name, discord_server_id)
+            )
+            self.cog.conn.commit()
+            embed = discord.Embed(
+                title="✅ Alliance Added",
+                description=f"Successfully added alliance `{name}`.",
+                color=discord.Color.green()
+            )
+            if discord_server_id:
+                embed.add_field(name="Discord Server ID", value=f"`{discord_server_id}`", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except sqlite3.IntegrityError:
+            await interaction.response.send_message("❌ An alliance with that name already exists.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message("❌ An error occurred while adding the alliance.", ephemeral=True)
 
 class PaginatedChannelView(discord.ui.View):
     def __init__(self, channels, original_callback):
