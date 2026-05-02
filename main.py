@@ -58,9 +58,13 @@ def setup_database():
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS admin (
-                id INTEGER PRIMARY KEY,
-                is_initial INTEGER
+            CREATE TABLE IF NOT EXISTS permissions (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('admin', 'mod')),
+                appointed_by INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
             )
         """)
 
@@ -143,6 +147,7 @@ class GremlinBot(commands.Bot):
 bot = GremlinBot(command_prefix="!", intents=intents)
 
 COGS = [
+    "cogs.permissions",
     "cogs.alliance",
     "cogs.alliance_member_operations",
     "cogs.bot_operations",

@@ -378,15 +378,8 @@ class IDChannel(commands.Cog):
 
     async def show_id_channel_menu(self, interaction: discord.Interaction):
         try:
-            is_admin = False
-            with sqlite3.connect('db/settings.sqlite') as settings_db:
-                cursor = settings_db.cursor()
-                cursor.execute("SELECT is_initial FROM admin WHERE id = ?", (interaction.user.id,))
-                result = cursor.fetchone()
-                if result:
-                    is_admin = True
-
-            if not is_admin:
+            permissions_cog = self.bot.get_cog("Permissions")
+            if not permissions_cog or not permissions_cog.check_permission(interaction.user.id, interaction.guild_id, "admin"):
                 await interaction.response.send_message(
                     "❌ You don't have permission to use this feature.", 
                     ephemeral=True

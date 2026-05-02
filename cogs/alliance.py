@@ -4,6 +4,7 @@ from discord.ext import commands
 import sqlite3  
 import asyncio
 from datetime import datetime
+from cogs.permissions import check_permission
 
 class Alliance(commands.Cog):
     def __init__(self, bot, conn):
@@ -43,17 +44,9 @@ class Alliance(commands.Cog):
     @app_commands.command(name="settings", description="Open settings menu.")
     async def settings(self, interaction: discord.Interaction):
         try:
-            self.c_settings.execute("SELECT COUNT(*) FROM admin")
-            admin_count = self.c_settings.fetchone()[0]
-
-            user_id = interaction.user.id
-
-            if admin_count == 0:
-                self.c_settings.execute("""
-                    INSERT INTO admin (id, is_initial) 
-                    VALUES (?, 1)
-                """, (user_id,))
-                self.conn_settings.commit()
+            if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+                await interaction.response.send_message("❌ You don't have permission to use settings.", ephemeral=True)
+                return
 
             embed = discord.Embed(
                 title="⚙️ Settings Menu",

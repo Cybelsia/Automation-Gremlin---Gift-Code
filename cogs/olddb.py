@@ -101,8 +101,7 @@ class DatabaseTransfer(commands.Cog):
                 row_count = len(rows)
 
                 if table == "admin":
-                    for row in rows:
-                        destination_cursor.execute("INSERT OR REPLACE INTO admin (id, is_initial) VALUES (?, ?)", row)
+                    pass
                 elif table == "alliance_channels":
                     destination_cursor.executemany("INSERT OR REPLACE INTO alliancesettings (alliance_id, channel_id) VALUES (?, ?)", rows)
                 elif table == "alliance_intervals":

@@ -139,7 +139,7 @@ class GiftCodeAPI:
                                         self.cursor.execute("SELECT alliance_id FROM giftcodecontrol WHERE status = 1")
                                         auto_alliances = self.cursor.fetchall() or []
 
-                                        self.settings_cursor.execute("SELECT id FROM admin WHERE is_initial = 1")
+                                        self.settings_cursor.execute("SELECT user_id FROM permissions WHERE role = 'admin'")
                                         admin_ids = self.settings_cursor.fetchall()
                                         if admin_ids:
                                             admin_embed = discord.Embed(
