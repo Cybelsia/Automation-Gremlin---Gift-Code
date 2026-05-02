@@ -10,6 +10,7 @@ from typing import List
 from datetime import datetime
 import os
 import ssl
+import traceback
 from cogs.permissions import check_permission
 
 SECRET = 'tB87#kPtkxqOS2'
@@ -40,11 +41,54 @@ class AllianceMemberOperations(commands.Cog):
         
         self.conn_users = sqlite3.connect('db/users.sqlite')
         self.c_users = self.conn_users.cursor()
+        self._ensure_users_table()
         
         self.level_mapping = {
             31: "30-1", 32: "30-2", 33: "30-3", 34: "30-4",
             35: "FC 1", 36: "FC 1 - 1", 37: "FC 1 - 2", 38: "FC 1 - 3", 39: "FC 1 - 4",
         }
+
+    def _ensure_users_table(self):
+        self.c_users.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                fid INTEGER PRIMARY KEY,
+                nickname TEXT,
+                furnace_lv INTEGER DEFAULT 0,
+                kid INTEGER,
+                stove_lv_content TEXT,
+                alliance TEXT,
+                discord_id INTEGER
+            )
+        """)
+        self.c_users.execute("PRAGMA table_info(users)")
+        columns = [info[1] for info in self.c_users.fetchall()]
+        if "discord_id" not in columns:
+            self.c_users.execute("ALTER TABLE users ADD COLUMN discord_id INTEGER")
+        self.conn_users.commit()
+
+    async def fetch_player_info(self, fid: int):
+        current_time = int(time.time() * 1000)
+        form = f"fid={fid}&time={current_time}"
+        sign = hashlib.md5((form + SECRET).encode('utf-8')).hexdigest()
+        form = f"sign={sign}&{form}"
+        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
+            async with session.post('https://wos-giftcode-api.centurygame.com/api/player', headers=headers, data=form) as response:
+                response_text = await response.text()
+                if response.status != 200:
+                    raise RuntimeError(f"Player API returned HTTP {response.status}: {response_text}")
+
+                data = await response.json()
+                player_data = data.get('data')
+                if not player_data:
+                    raise RuntimeError(f"Player API returned no player data: {data}")
+
+                return player_data
 
     async def handle_member_operations(self, interaction: discord.Interaction):
         embed = discord.Embed(
@@ -149,12 +193,17 @@ class AllianceMemberOperations(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    async def add_alliance_member(self, interaction: discord.Interaction, alliance_id: int, fid: int, nickname: str, furnace_lv: int, kid: int | None):
-        stove_lv_content = self.level_mapping.get(furnace_lv, str(furnace_lv))
+    async def add_alliance_member(self, interaction: discord.Interaction, alliance_id: int, fid: int, discord_id: int):
+        player_data = await self.fetch_player_info(fid)
+        nickname = player_data.get('nickname')
+        furnace_lv = player_data.get('stove_lv', 0)
+        kid = player_data.get('kid', None)
+        stove_lv_content = player_data.get('stove_lv_content') or self.level_mapping.get(furnace_lv, str(furnace_lv))
+
         self.c_users.execute("""
-            INSERT OR REPLACE INTO users (fid, nickname, furnace_lv, kid, stove_lv_content, alliance)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (fid, nickname, furnace_lv, kid, stove_lv_content, alliance_id))
+            INSERT OR REPLACE INTO users (fid, discord_id, nickname, furnace_lv, kid, stove_lv_content, alliance)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (fid, discord_id, nickname, furnace_lv, kid, stove_lv_content, alliance_id))
         self.conn_users.commit()
 
         self.c_alliance.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
@@ -167,8 +216,11 @@ class AllianceMemberOperations(commands.Cog):
             color=discord.Color.green()
         )
         embed.add_field(name="FID", value=f"`{fid}`", inline=True)
+        embed.add_field(name="Discord ID", value=f"`{discord_id}`", inline=True)
+        embed.add_field(name="Nickname", value=f"`{nickname}`", inline=True)
         embed.add_field(name="Furnace Level", value=f"`{stove_lv_content}`", inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        embed.add_field(name="Kingdom ID", value=f"`{kid or 'Unknown'}`", inline=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 class AllianceSelectView(discord.ui.View):
     def __init__(self, alliances_with_counts, cog=None, page=0):
@@ -238,9 +290,7 @@ class MemberOperationsView(discord.ui.View):
 
 class AddAllianceMemberModal(discord.ui.Modal, title="Add Alliance Member"):
     fid = discord.ui.TextInput(label="FID", placeholder="Enter player FID", max_length=20)
-    nickname = discord.ui.TextInput(label="Nickname", placeholder="Enter player nickname", max_length=100)
-    furnace_lv = discord.ui.TextInput(label="Furnace Level", placeholder="Enter furnace level", max_length=5)
-    kid = discord.ui.TextInput(label="Kingdom ID", placeholder="Optional", required=False, max_length=10)
+    discord_id = discord.ui.TextInput(label="Discord ID", placeholder="Enter Discord user ID", max_length=20)
 
     def __init__(self, cog, alliance_id: int):
         super().__init__()
@@ -249,22 +299,25 @@ class AddAllianceMemberModal(discord.ui.Modal, title="Add Alliance Member"):
 
     async def on_submit(self, interaction: discord.Interaction):
         fid_value = str(self.fid.value).strip()
-        furnace_value = str(self.furnace_lv.value).strip()
-        kid_value = str(self.kid.value).strip()
-        nickname = str(self.nickname.value).strip()
+        discord_id_value = str(self.discord_id.value).strip()
 
-        if not fid_value.isdigit() or not furnace_value.isdigit() or (kid_value and not kid_value.isdigit()):
-            await interaction.response.send_message("❌ FID, furnace level, and kingdom ID must be numeric.", ephemeral=True)
+        if not fid_value.isdigit() or not discord_id_value.isdigit():
+            await interaction.response.send_message("❌ FID and Discord ID must be numeric.", ephemeral=True)
             return
 
-        await self.cog.add_alliance_member(
-            interaction,
-            self.alliance_id,
-            int(fid_value),
-            nickname,
-            int(furnace_value),
-            int(kid_value) if kid_value else None
-        )
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            await self.cog.add_alliance_member(
+                interaction,
+                self.alliance_id,
+                int(fid_value),
+                int(discord_id_value)
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to add alliance member fid={fid_value} discord_id={discord_id_value}: {e}")
+            traceback.print_exc()
+            await interaction.followup.send("❌ Failed to fetch or save player information.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(AllianceMemberOperations(bot))
