@@ -5,6 +5,7 @@ import sqlite3
 import asyncio
 import requests
 from .alliance_member_operations import AllianceSelectView
+from cogs.permissions import check_permission
 
 VERSION_URL = "https://raw.githubusercontent.com/Reloisback/Whiteout-Survival-Discord-Bot/refs/heads/main/autoupdateinfo.txt"
 
@@ -16,31 +17,6 @@ class BotOperations(commands.Cog):
         self.settings_cursor = self.settings_db.cursor()
         self.alliance_db = sqlite3.connect('db/alliance.sqlite', check_same_thread=False)
         self.c_alliance = self.alliance_db.cursor()
-        self.setup_database()
-
-    def setup_database(self):
-        try:
-            self.settings_cursor.execute("""
-                CREATE TABLE IF NOT EXISTS admin (
-                    id INTEGER PRIMARY KEY,
-                    is_initial INTEGER DEFAULT 0
-                )
-            """)
-            
-            self.settings_cursor.execute("""
-                CREATE TABLE IF NOT EXISTS adminserver (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    admin INTEGER NOT NULL,
-                    alliances_id INTEGER NOT NULL,
-                    FOREIGN KEY (admin) REFERENCES admin(id),
-                    UNIQUE(admin, alliances_id)
-                )
-            """)
-            
-            self.settings_db.commit()
-                
-        except Exception as e:
-            pass
 
     def __del__(self):
         try:
@@ -51,6 +27,10 @@ class BotOperations(commands.Cog):
 
     async def show_bot_operations_menu(self, interaction: discord.Interaction):
         try:
+            if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+                await interaction.response.send_message("❌ You don't have permission to use bot operations.", ephemeral=True)
+                return
+
             embed = discord.Embed(
                 title="🤖 Bot Operations",
                 description=(
@@ -126,8 +106,8 @@ class BotOperations(commands.Cog):
     async def confirm_permission_removal(self, admin_id: int, alliance_id: int, confirm_interaction: discord.Interaction):
         try:
             self.settings_cursor.execute("""
-                DELETE FROM adminserver 
-                WHERE admin = ? AND alliances_id = ?
+                DELETE FROM permissions
+                WHERE user_id = ? AND guild_id = ?
             """, (admin_id, alliance_id))
             self.settings_db.commit()
             return True
