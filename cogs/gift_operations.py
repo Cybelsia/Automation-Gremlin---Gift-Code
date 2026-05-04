@@ -189,6 +189,23 @@ class GiftOperations(commands.Cog):
     async def before_alliance_scheduler(self):
         await self.bot.wait_until_ready()
 
+    def upsert_scanned_member(self, fid, nickname, furnace_lv, kid, stove_lv_content, alliance_id):
+        with sqlite3.connect('db/users.sqlite') as users_conn:
+            users_conn.execute(
+                """
+                INSERT INTO users (fid, nickname, furnace_lv, kid, stove_lv_content, alliance)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fid) DO UPDATE SET
+                    nickname = excluded.nickname,
+                    furnace_lv = excluded.furnace_lv,
+                    kid = excluded.kid,
+                    stove_lv_content = excluded.stove_lv_content,
+                    alliance = excluded.alliance
+                """,
+                (fid, nickname, furnace_lv, kid, stove_lv_content, alliance_id)
+            )
+            users_conn.commit()
+
     async def run_member_scan(self, label: str = "Weekly"):
         """Runs the member scan for all alliances with a results channel. Called by scheduler and manual trigger."""
         now = datetime.utcnow()
@@ -217,7 +234,7 @@ class GiftOperations(commands.Cog):
                 with sqlite3.connect('db/users.sqlite') as users_conn:
                     users_cursor = users_conn.cursor()
                     users_cursor.execute(
-                        "SELECT fid, nickname, furnace_lv FROM users WHERE alliance = ?",
+                        "SELECT fid, nickname, furnace_lv, kid, stove_lv_content FROM users WHERE alliance = ?",
                         (alliance_id,)
                     )
                     members = users_cursor.fetchall()
@@ -230,7 +247,7 @@ class GiftOperations(commands.Cog):
                 furnace_changes = []
                 errors = []
 
-                for fid, old_nickname, old_furnace_lv in members:
+                for fid, old_nickname, old_furnace_lv, old_kid, old_stove_lv_content in members:
                     try:
                         time_val = int(datetime.utcnow().timestamp())
                         form = f"fid={fid}&time={time_val}"
@@ -254,22 +271,22 @@ class GiftOperations(commands.Cog):
                         player = data.get('data', {})
                         new_nickname = player.get('nickname')
                         new_furnace_lv = player.get('stove_lv')
+                        new_kid = player.get('kid')
+                        new_stove_lv_content = player.get('stove_lv_content')
 
-                        updated = False
                         if new_nickname and new_nickname != old_nickname:
                             name_changes.append((fid, old_nickname, new_nickname))
-                            updated = True
                         if new_furnace_lv is not None and new_furnace_lv != old_furnace_lv:
                             furnace_changes.append((fid, old_furnace_lv, new_furnace_lv))
-                            updated = True
 
-                        if updated:
-                            with sqlite3.connect('db/users.sqlite') as users_conn:
-                                users_conn.execute(
-                                    "UPDATE users SET nickname = ?, furnace_lv = ? WHERE fid = ?",
-                                    (new_nickname or old_nickname, new_furnace_lv if new_furnace_lv is not None else old_furnace_lv, fid)
-                                )
-                                users_conn.commit()
+                        self.upsert_scanned_member(
+                            fid,
+                            new_nickname or old_nickname,
+                            new_furnace_lv if new_furnace_lv is not None else old_furnace_lv,
+                            new_kid if new_kid is not None else old_kid,
+                            new_stove_lv_content or old_stove_lv_content,
+                            alliance_id
+                        )
 
                         await asyncio.sleep(1)
 
