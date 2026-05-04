@@ -167,16 +167,22 @@ class GiftOperations(commands.Cog):
             return all_alliance_ids
         return [row[0] for row in rows]
 
-    async def save_auto_gift_channel(self, interaction: discord.Interaction, channel_id: int):
+    async def save_auto_gift_channel(self, interaction: discord.Interaction, channel):
         self.gift_operations_cursor.execute(
             """
             INSERT OR REPLACE INTO auto_gift_settings (guild_id, channel_id)
             VALUES (?, ?)
             """,
-            (interaction.guild_id, channel_id)
+            (interaction.guild_id, channel.id)
         )
         self.gift_operations_conn.commit()
-        await interaction.response.send_message(f"✅ Auto gift code channel set to <#{channel_id}>.", ephemeral=True)
+        embed = discord.Embed(
+            title="✅ Gift Code Channel Updated",
+            description=f"Auto gift codes will now be read from {channel.mention}.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Channel", value=channel.name, inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def show_auto_gift_alliance_select(self, interaction: discord.Interaction):
         self.alliance_cursor.execute(
@@ -542,7 +548,12 @@ class AutoGiftSettingsView(discord.ui.View):
         if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
             await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
             return
-        await interaction.response.send_modal(AutoGiftChannelModal(self.cog))
+        embed = discord.Embed(
+            title="📢 Select Gift Code Channel",
+            description="Choose the channel where auto gift codes will be detected.",
+            color=discord.Color.gold()
+        )
+        await interaction.response.send_message(embed=embed, view=AutoGiftChannelSelectView(self.cog), ephemeral=True)
 
     @discord.ui.button(label="Configure Alliances", emoji="🛡️", style=discord.ButtonStyle.secondary, row=0)
     async def configure_alliances_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -552,30 +563,30 @@ class AutoGiftSettingsView(discord.ui.View):
         await self.cog.show_auto_gift_alliance_select(interaction)
 
 
-class AutoGiftChannelModal(discord.ui.Modal, title="Set Gift Code Channel"):
-    channel_id = discord.ui.TextInput(
-        label="Channel ID",
-        placeholder="Enter channel ID",
-        max_length=25
-    )
-
+class AutoGiftChannelSelectView(discord.ui.View):
     def __init__(self, cog):
-        super().__init__()
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.add_item(AutoGiftChannelSelect(cog))
+
+
+class AutoGiftChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog):
+        super().__init__(
+            placeholder="Select gift code channel",
+            min_values=1,
+            max_values=1,
+            channel_types=[discord.ChannelType.text]
+        )
         self.cog = cog
 
-    async def on_submit(self, interaction: discord.Interaction):
-        channel_id_value = str(self.channel_id.value).strip()
-        if not channel_id_value.isdigit():
-            await interaction.response.send_message("❌ Channel ID must be a number.", ephemeral=True)
+    async def callback(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
             return
 
-        channel_id = int(channel_id_value)
-        channel = interaction.guild.get_channel(channel_id) if interaction.guild else None
-        if channel is None:
-            await interaction.response.send_message("❌ Channel not found in this server.", ephemeral=True)
-            return
-
-        await self.cog.save_auto_gift_channel(interaction, channel_id)
+        channel = self.values[0]
+        await self.cog.save_auto_gift_channel(interaction, channel)
 
 
 class AutoGiftAllianceSelectView(discord.ui.View):
