@@ -217,6 +217,8 @@ class AllianceMemberOperations(commands.Cog):
         self.c_alliance.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
         alliance = self.c_alliance.fetchone()
         alliance_name = alliance[0] if alliance else f"Alliance {alliance_id}"
+        discord_user = await self.bot.fetch_user(int(discord_id))
+        discord_name = str(discord_user) if discord_user else str(discord_id)
 
         embed = discord.Embed(
             title="✅ Alliance Member Added",
@@ -225,6 +227,7 @@ class AllianceMemberOperations(commands.Cog):
         )
         embed.add_field(name="FID", value=f"`{fid}`", inline=True)
         embed.add_field(name="Discord ID", value=f"`{discord_id}`", inline=True)
+        embed.add_field(name="Discord", value=f"`{discord_name}`", inline=True)
         embed.add_field(name="Nickname", value=f"`{nickname}`", inline=True)
         embed.add_field(name="Furnace Level", value=f"`{stove_lv_content}`", inline=True)
         embed.add_field(name="Kingdom ID", value=f"`{kid or 'Unknown'}`", inline=True)
