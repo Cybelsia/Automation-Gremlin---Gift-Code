@@ -11,7 +11,7 @@ VERSION_URL = "https://raw.githubusercontent.com/Reloisback/Whiteout-Survival-Di
 
 BOT_OWNER_ID = 1237812594140512347
 
-class BotOperations(commands.Cog):
+class AdminPanel(commands.Cog):
     def __init__(self, bot, conn):
         self.bot = bot
         self.conn = conn
@@ -30,7 +30,7 @@ class BotOperations(commands.Cog):
     def is_owner(self, user_id: int) -> bool:
         return user_id == BOT_OWNER_ID
 
-    async def show_bot_operations_menu(self, interaction: discord.Interaction):
+    async def show_admin_panel_menu(self, interaction: discord.Interaction):
         try:
             if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
                 await interaction.response.send_message("❌ You don't have permission to use bot operations.", ephemeral=True)
@@ -122,7 +122,7 @@ class BotOperations(commands.Cog):
 
         except Exception as e:
             if not any(error_code in str(e) for error_code in ["10062", "40060"]):
-                print(f"Show bot operations menu error: {e}")
+                print(f"Show admin panel menu error: {e}")
             if not interaction.response.is_done():
                 await interaction.response.send_message(
                     "❌ An error occurred while showing the menu.",
@@ -821,4 +821,4 @@ class BotOperations(commands.Cog):
                     await interaction.response.send_message("❌ Main menu not found.", ephemeral=True)
 
 async def setup(bot):
-    await bot.add_cog(BotOperations(bot, sqlite3.connect('db/settings.sqlite')))
+    await bot.add_cog(AdminPanel(bot, sqlite3.connect('db/settings.sqlite')))
