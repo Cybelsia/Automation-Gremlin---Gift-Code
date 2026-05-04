@@ -135,6 +135,9 @@ class Alliance(commands.Cog):
             await interaction.response.send_message("❌ An error occurred while loading alliances.", ephemeral=True)
 
     async def show_add_alliance_modal(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ You need admin permissions to create an alliance.", ephemeral=True)
+            return
         try:
             print(f"[DEBUG] Opening AddAllianceModal guild_id={interaction.guild_id} user_id={interaction.user.id}")
             await interaction.response.send_modal(AddAllianceModal(self))
