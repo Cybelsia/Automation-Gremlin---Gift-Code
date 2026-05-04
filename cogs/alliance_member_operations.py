@@ -195,6 +195,8 @@ class AllianceMemberOperations(commands.Cog):
             alliance_id = int(view.current_select.values[0])
             if operation == "add":
                 await select_interaction.response.send_modal(AddAllianceMemberModal(self, alliance_id))
+            elif operation == "bulk_add":
+                await select_interaction.response.send_modal(BulkAddAllianceMembersModal(self, alliance_id))
             elif operation == "edit":
                 await self.show_member_select(select_interaction, alliance_id, "edit")
             elif operation == "delete":
@@ -377,6 +379,10 @@ class MemberOperationsView(discord.ui.View):
     async def add_alliance_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_alliance_select(interaction, "add")
 
+    @discord.ui.button(label="Bulk Add Members", emoji="📥", style=discord.ButtonStyle.success, row=0)
+    async def bulk_add_members_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_alliance_select(interaction, "bulk_add")
+
     @discord.ui.button(label="View Alliance Members", emoji="👥", style=discord.ButtonStyle.primary, row=0)
     async def view_alliance_members_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_alliance_select(interaction, "view")
@@ -457,6 +463,82 @@ class ConfirmDeleteMemberView(discord.ui.View):
     @discord.ui.button(label="Cancel", emoji="✖️", style=discord.ButtonStyle.secondary)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="Deletion cancelled.", embed=None, view=None)
+
+
+class BulkAddAllianceMembersModal(discord.ui.Modal, title="Bulk Add Alliance Members"):
+    member_list = discord.ui.TextInput(
+        label="Members",
+        style=discord.TextStyle.paragraph,
+        placeholder="One per line: nickname,fid",
+        max_length=4000
+    )
+
+    def __init__(self, cog, alliance_id: int):
+        super().__init__()
+        self.cog = cog
+        self.alliance_id = alliance_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.member_list.value).strip()
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+
+        if not lines:
+            await interaction.response.send_message("❌ No members were provided.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        added = []
+        skipped = []
+        errors = []
+
+        for line in lines:
+            try:
+                if "," not in line:
+                    skipped.append(f"`{line}`")
+                    continue
+
+                nickname, fid_text = [part.strip() for part in line.split(",", 1)]
+                if not nickname or not fid_text.isdigit():
+                    skipped.append(f"`{line}`")
+                    continue
+
+                fid = int(fid_text)
+
+                self.cog.c_users.execute("SELECT fid FROM users WHERE fid = ?", (fid,))
+                exists = self.cog.c_users.fetchone()
+
+                if exists:
+                    self.cog.c_users.execute(
+                        "UPDATE users SET nickname = ?, alliance = ? WHERE fid = ?",
+                        (nickname, self.alliance_id, fid)
+                    )
+                else:
+                    self.cog.c_users.execute(
+                        "INSERT INTO users (fid, nickname, alliance) VALUES (?, ?, ?)",
+                        (fid, nickname, self.alliance_id)
+                    )
+
+                added.append(f"`{nickname}` (`{fid}`)")
+            except Exception as e:
+                errors.append(f"`{line}`")
+                print(f"[ERROR] Bulk add member line={line}: {e}")
+
+        self.cog.conn_users.commit()
+
+        embed = discord.Embed(title="✅ Bulk Import Complete", color=discord.Color.green())
+        embed.add_field(name="Processed", value=str(len(lines)), inline=True)
+        embed.add_field(name="Saved", value=str(len(added)), inline=True)
+        embed.add_field(name="Skipped", value=str(len(skipped)), inline=True)
+
+        if added:
+            embed.add_field(name="Added/Updated", value="\n".join(added[:20]), inline=False)
+        if skipped:
+            embed.add_field(name="Skipped Lines", value="\n".join(skipped[:20]), inline=False)
+        if errors:
+            embed.add_field(name="Errors", value="\n".join(errors[:10]), inline=False)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 class AddAllianceMemberModal(discord.ui.Modal, title="Add Alliance Member"):
