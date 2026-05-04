@@ -469,7 +469,7 @@ class BulkAddAllianceMembersModal(discord.ui.Modal, title="Bulk Add Alliance Mem
     member_list = discord.ui.TextInput(
         label="Members",
         style=discord.TextStyle.paragraph,
-        placeholder="One per line: nickname,fid",
+        placeholder="Paste FIDs separated by commas",
         max_length=4000
     )
 
@@ -480,10 +480,12 @@ class BulkAddAllianceMembersModal(discord.ui.Modal, title="Bulk Add Alliance Mem
 
     async def on_submit(self, interaction: discord.Interaction):
         raw = str(self.member_list.value).strip()
-        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        parts = [part.strip() for part in raw.split(",") if part.strip()]
+        print(f"[DEBUG] bulk raw={raw!r}")
+        print(f"[DEBUG] bulk parts={parts!r}")
 
-        if not lines:
-            await interaction.response.send_message("❌ No members were provided.", ephemeral=True)
+        if not parts:
+            await interaction.response.send_message("❌ No FIDs were provided.", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -492,15 +494,11 @@ class BulkAddAllianceMembersModal(discord.ui.Modal, title="Bulk Add Alliance Mem
         skipped = []
         errors = []
 
-        for line in lines:
+        for part in parts:
             try:
-                if "," not in line:
-                    skipped.append(f"`{line}`")
-                    continue
-
-                nickname, fid_text = [part.strip() for part in line.split(",", 1)]
-                if not nickname or not fid_text.isdigit():
-                    skipped.append(f"`{line}`")
+                fid_text = part.replace(" ", "")
+                if not fid_text.isdigit():
+                    skipped.append(f"`{part}`")
                     continue
 
                 fid = int(fid_text)
@@ -510,36 +508,35 @@ class BulkAddAllianceMembersModal(discord.ui.Modal, title="Bulk Add Alliance Mem
 
                 if exists:
                     self.cog.c_users.execute(
-                        "UPDATE users SET nickname = ?, alliance = ? WHERE fid = ?",
-                        (nickname, self.alliance_id, fid)
+                        "UPDATE users SET alliance = ? WHERE fid = ?",
+                        (self.alliance_id, fid)
                     )
                 else:
                     self.cog.c_users.execute(
-                        "INSERT INTO users (fid, nickname, alliance) VALUES (?, ?, ?)",
-                        (fid, nickname, self.alliance_id)
+                        "INSERT INTO users (fid, alliance) VALUES (?, ?)",
+                        (fid, self.alliance_id)
                     )
 
-                added.append(f"`{nickname}` (`{fid}`)")
+                added.append(f"`{fid}`")
             except Exception as e:
-                errors.append(f"`{line}`")
-                print(f"[ERROR] Bulk add member line={line}: {e}")
+                errors.append(f"`{part}`")
+                print(f"[ERROR] Bulk add member fid_part={part}: {e}")
 
         self.cog.conn_users.commit()
 
         embed = discord.Embed(title="✅ Bulk Import Complete", color=discord.Color.green())
-        embed.add_field(name="Processed", value=str(len(lines)), inline=True)
+        embed.add_field(name="Processed", value=str(len(parts)), inline=True)
         embed.add_field(name="Saved", value=str(len(added)), inline=True)
         embed.add_field(name="Skipped", value=str(len(skipped)), inline=True)
 
         if added:
             embed.add_field(name="Added/Updated", value="\n".join(added[:20]), inline=False)
         if skipped:
-            embed.add_field(name="Skipped Lines", value="\n".join(skipped[:20]), inline=False)
+            embed.add_field(name="Skipped FIDs", value="\n".join(skipped[:20]), inline=False)
         if errors:
             embed.add_field(name="Errors", value="\n".join(errors[:10]), inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
-
 
 class AddAllianceMemberModal(discord.ui.Modal, title="Add Alliance Member"):
     fid = discord.ui.TextInput(label="FID", placeholder="Enter player FID", max_length=20)
