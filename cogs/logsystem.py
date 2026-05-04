@@ -115,9 +115,9 @@ class LogSystem(commands.Cog):
             await self.show_log_system_menu(interaction)
 
         elif custom_id == "bot_operations":
-            bot_operations_cog = self.bot.get_cog("BotOperations")
-            if bot_operations_cog:
-                await bot_operations_cog.show_bot_operations_menu(interaction)
+            admin_panel_cog = self.bot.get_cog("AdminPanel")
+            if admin_panel_cog:
+                await admin_panel_cog.show_admin_panel_menu(interaction)
             else:
                 await interaction.response.send_message("❌ Bot Operations module not found.", ephemeral=True)
 
