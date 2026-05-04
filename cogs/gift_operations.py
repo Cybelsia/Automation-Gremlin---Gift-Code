@@ -1,5 +1,7 @@
 import discord
 from discord.ext import commands
+import aiohttp
+import ssl
 import requests
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
@@ -15,6 +17,7 @@ from .alliance import PaginatedChannelView
 import os
 import traceback
 from .gift_operationsapi import GiftCodeAPI
+from cogs.permissions import check_permission
 
 class GiftOperations(commands.Cog):
     def __init__(self, bot):
@@ -88,6 +91,113 @@ class GiftOperations(commands.Cog):
         view = GiftMenuView(self)
         await interaction.response.edit_message(embed=gift_menu_embed, view=view)
 
+    async def show_create_gift_code_modal(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message("❌ You don't have permission to use this feature.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(CreateGiftCodeModal(self))
+
+    async def get_alliance_by_input(self, alliance_value: str, guild_id: int):
+        if alliance_value.isdigit():
+            self.alliance_cursor.execute(
+                """
+                SELECT alliance_id, name
+                FROM alliance_list
+                WHERE alliance_id = ? AND discord_server_id = ?
+                """,
+                (int(alliance_value), guild_id)
+            )
+        else:
+            self.alliance_cursor.execute(
+                """
+                SELECT alliance_id, name
+                FROM alliance_list
+                WHERE LOWER(name) = LOWER(?) AND discord_server_id = ?
+                """,
+                (alliance_value, guild_id)
+            )
+        return self.alliance_cursor.fetchone()
+
+    async def redeem_gift_code_for_fid(self, fid: int, gift_code: str):
+        time_val = int(datetime.now().timestamp())
+        form = f"cdk={gift_code}&fid={fid}&time={time_val}"
+        sign = hashlib.md5((form + self.wos_encrypt_key).encode('utf-8')).hexdigest()
+        form_data = f"cdk={gift_code}&fid={fid}&sign={sign}&time={time_val}"
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/x-www-form-urlencoded",
+            "origin": self.wos_giftcode_redemption_url,
+            "referer": f"{self.wos_giftcode_redemption_url}/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
+            async with session.post(self.wos_giftcode_url, headers=headers, data=form_data) as response:
+                response_text = await response.text()
+                if response.status != 200:
+                    return False, f"HTTP {response.status}: {response_text}"
+
+                try:
+                    data = json.loads(response_text)
+                except json.JSONDecodeError:
+                    return False, response_text
+
+                if data.get("code") == 0 or data.get("success") is True:
+                    return True, response_text
+
+                return False, response_text
+
+    async def create_gift_code_for_alliance(self, interaction: discord.Interaction, gift_code: str, alliance_value: str):
+        if interaction.guild_id is None:
+            await interaction.followup.send("❌ This can only be used in a server.", ephemeral=True)
+            return
+
+        alliance = await self.get_alliance_by_input(alliance_value, interaction.guild_id)
+        if not alliance:
+            await interaction.followup.send("❌ Alliance not found for this server.", ephemeral=True)
+            return
+
+        alliance_id, alliance_name = alliance
+        with sqlite3.connect('db/users.sqlite') as users_conn:
+            users_cursor = users_conn.cursor()
+            users_cursor.execute("SELECT fid FROM users WHERE alliance = ?", (alliance_id,))
+            members = users_cursor.fetchall()
+
+        if not members:
+            await interaction.followup.send(f"❌ No members found for `{alliance_name}`.", ephemeral=True)
+            return
+
+        success_count = 0
+        failed = []
+
+        for (fid,) in members:
+            ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
+            if ok:
+                success_count += 1
+            else:
+                failed.append((fid, result))
+            await asyncio.sleep(1)
+
+        embed = discord.Embed(
+            title="🎁 Gift Code Redemption Complete",
+            description=f"Redeemed `{gift_code}` for `{alliance_name}`.",
+            color=discord.Color.green() if not failed else discord.Color.orange()
+        )
+        embed.add_field(name="Total Members", value=f"`{len(members)}`", inline=True)
+        embed.add_field(name="Succeeded", value=f"`{success_count}`", inline=True)
+        embed.add_field(name="Failed", value=f"`{len(failed)}`", inline=True)
+
+        if failed:
+            failed_preview = "\n".join(f"`{fid}`: {str(reason)[:80]}" for fid, reason in failed[:10])
+            embed.add_field(name="Failures", value=failed_preview, inline=False)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 
 class GiftMenuView(discord.ui.View):
     def __init__(self, cog):
@@ -99,7 +209,7 @@ class GiftMenuView(discord.ui.View):
 
     @discord.ui.button(label="Create Gift Code", emoji="🎫", style=discord.ButtonStyle.primary, row=0)
     async def create_gift_code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._not_configured(interaction, "Create Gift Code")
+        await self.cog.show_create_gift_code_modal(interaction)
 
     @discord.ui.button(label="List Gift Codes", emoji="📋", style=discord.ButtonStyle.secondary, row=0)
     async def list_gift_codes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -127,6 +237,40 @@ class GiftMenuView(discord.ui.View):
             await alliance_cog.show_main_menu(interaction)
         else:
             await interaction.response.send_message("❌ Settings menu not found.", ephemeral=True)
+
+
+class CreateGiftCodeModal(discord.ui.Modal, title="Create Gift Code"):
+    gift_code = discord.ui.TextInput(
+        label="Gift Code",
+        placeholder="Enter gift code",
+        max_length=100
+    )
+    alliance = discord.ui.TextInput(
+        label="Alliance",
+        placeholder="Enter alliance ID or exact alliance name",
+        max_length=100
+    )
+
+    def __init__(self, cog):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        gift_code_value = str(self.gift_code.value).strip()
+        alliance_value = str(self.alliance.value).strip()
+
+        if not gift_code_value or not alliance_value:
+            await interaction.response.send_message("❌ Gift Code and Alliance are required.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            await self.cog.create_gift_code_for_alliance(interaction, gift_code_value, alliance_value)
+        except Exception as e:
+            print(f"[ERROR] Failed to redeem gift code gift_code={gift_code_value} alliance={alliance_value}: {e}")
+            traceback.print_exc()
+            await interaction.followup.send("❌ An error occurred while redeeming the gift code.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(GiftOperations(bot))
