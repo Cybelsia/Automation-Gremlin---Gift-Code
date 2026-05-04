@@ -50,9 +50,14 @@ class GiftOperations(commands.Cog):
         self.gift_operations_cursor.execute("""
             CREATE TABLE IF NOT EXISTS auto_gift_settings (
                 guild_id INTEGER PRIMARY KEY,
-                channel_id INTEGER
+                channel_id INTEGER,
+                results_channel_id INTEGER
             )
         """)
+        self.gift_operations_cursor.execute("PRAGMA table_info(auto_gift_settings)")
+        auto_gift_settings_columns = [column[1] for column in self.gift_operations_cursor.fetchall()]
+        if "results_channel_id" not in auto_gift_settings_columns:
+            self.gift_operations_cursor.execute("ALTER TABLE auto_gift_settings ADD COLUMN results_channel_id INTEGER")
         self.gift_operations_cursor.execute("""
             CREATE TABLE IF NOT EXISTS auto_gift_alliances (
                 guild_id INTEGER,
@@ -121,11 +126,12 @@ class GiftOperations(commands.Cog):
             return
 
         self.gift_operations_cursor.execute(
-            "SELECT channel_id FROM auto_gift_settings WHERE guild_id = ?",
+            "SELECT channel_id, results_channel_id FROM auto_gift_settings WHERE guild_id = ?",
             (interaction.guild_id,)
         )
         channel_row = self.gift_operations_cursor.fetchone()
         channel_text = f"<#{channel_row[0]}>" if channel_row and channel_row[0] else "`Not set`"
+        results_channel_text = f"<#{channel_row[1]}>" if channel_row and channel_row[1] else "`Not set`"
 
         self.alliance_cursor.execute(
             """
@@ -146,6 +152,8 @@ class GiftOperations(commands.Cog):
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 "📢 **Set Gift Code Channel**\n"
                 "└ Save the channel used for auto gift code messages\n\n"
+                "📊 **Set Results Channel**\n"
+                "└ Save the channel used for auto redemption results\n\n"
                 "🛡️ **Configure Alliances**\n"
                 "└ Toggle which alliances participate in auto-redemption\n"
                 "━━━━━━━━━━━━━━━━━━━━━━"
@@ -153,6 +161,7 @@ class GiftOperations(commands.Cog):
             color=discord.Color.gold()
         )
         embed.add_field(name="Gift Code Channel", value=channel_text, inline=False)
+        embed.add_field(name="Results Channel", value=results_channel_text, inline=False)
         embed.add_field(name="Enabled Alliances", value=f"`{len(enabled_alliances)}` / `{len(alliances)}`", inline=False)
         await interaction.response.send_message(embed=embed, view=AutoGiftSettingsView(self), ephemeral=True)
 
@@ -179,6 +188,24 @@ class GiftOperations(commands.Cog):
         embed = discord.Embed(
             title="✅ Gift Code Channel Updated",
             description=f"Auto gift codes will now be read from {channel.mention}.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Channel", value=channel.name, inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def save_auto_gift_results_channel(self, interaction: discord.Interaction, channel):
+        self.gift_operations_cursor.execute(
+            """
+            INSERT INTO auto_gift_settings (guild_id, results_channel_id)
+            VALUES (?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET results_channel_id = excluded.results_channel_id
+            """,
+            (interaction.guild_id, channel.id)
+        )
+        self.gift_operations_conn.commit()
+        embed = discord.Embed(
+            title="✅ Results Channel Updated",
+            description=f"Auto gift redemption results will now be posted in {channel.mention}.",
             color=discord.Color.green()
         )
         embed.add_field(name="Channel", value=channel.name, inline=False)
@@ -249,6 +276,14 @@ class GiftOperations(commands.Cog):
         row = self.gift_operations_cursor.fetchone()
         return row[0] if row else None
 
+    def get_auto_gift_results_channel_id(self, guild_id: int):
+        self.gift_operations_cursor.execute(
+            "SELECT results_channel_id FROM auto_gift_settings WHERE guild_id = ?",
+            (guild_id,)
+        )
+        row = self.gift_operations_cursor.fetchone()
+        return row[0] if row else None
+
     def get_guild_alliances(self, guild_id: int):
         self.alliance_cursor.execute(
             """
@@ -291,7 +326,9 @@ class GiftOperations(commands.Cog):
 
             alliances = self.get_enabled_auto_gift_alliances_for_guild(message.guild.id)
             if not alliances:
-                await message.channel.send("❌ No enabled alliances found for auto gift redemption.")
+                results_channel_id = self.get_auto_gift_results_channel_id(message.guild.id)
+                results_channel = message.guild.get_channel(results_channel_id) if results_channel_id else message.channel
+                await results_channel.send("❌ No enabled alliances found for auto gift redemption.")
                 return
 
             total_success = 0
@@ -323,7 +360,11 @@ class GiftOperations(commands.Cog):
             embed.add_field(name="Alliances Processed", value=f"`{processed_alliances}`", inline=True)
             embed.add_field(name="Total Succeeded", value=f"`{total_success}`", inline=True)
             embed.add_field(name="Total Failed", value=f"`{total_failed}`", inline=True)
-            await message.channel.send(embed=embed)
+            results_channel_id = self.get_auto_gift_results_channel_id(message.guild.id)
+            results_channel = message.guild.get_channel(results_channel_id) if results_channel_id else message.channel
+            if results_channel is None:
+                results_channel = message.channel
+            await results_channel.send(embed=embed)
 
         except Exception as e:
             print(f"[ERROR] Auto gift code redemption failed: {e}")
@@ -555,6 +596,18 @@ class AutoGiftSettingsView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed, view=AutoGiftChannelSelectView(self.cog), ephemeral=True)
 
+    @discord.ui.button(label="Set Results Channel", emoji="📊", style=discord.ButtonStyle.primary, row=0)
+    async def set_results_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title="📊 Select Results Channel",
+            description="Choose the channel where auto gift redemption results will be posted.",
+            color=discord.Color.gold()
+        )
+        await interaction.response.send_message(embed=embed, view=AutoGiftResultsChannelSelectView(self.cog), ephemeral=True)
+
     @discord.ui.button(label="Configure Alliances", emoji="🛡️", style=discord.ButtonStyle.secondary, row=0)
     async def configure_alliances_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
@@ -587,6 +640,32 @@ class AutoGiftChannelSelect(discord.ui.ChannelSelect):
 
         channel = self.values[0]
         await self.cog.save_auto_gift_channel(interaction, channel)
+
+
+class AutoGiftResultsChannelSelectView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.add_item(AutoGiftResultsChannelSelect(cog))
+
+
+class AutoGiftResultsChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog):
+        super().__init__(
+            placeholder="Select results channel",
+            min_values=1,
+            max_values=1,
+            channel_types=[discord.ChannelType.text]
+        )
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
+            return
+
+        channel = self.values[0]
+        await self.cog.save_auto_gift_results_channel(interaction, channel)
 
 
 class AutoGiftAllianceSelectView(discord.ui.View):
