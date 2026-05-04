@@ -119,6 +119,37 @@ class GiftOperations(commands.Cog):
             )
         return self.alliance_cursor.fetchone()
 
+    async def show_gift_code_alliance_select(self, interaction: discord.Interaction, gift_code: str):
+        if interaction.guild_id is None:
+            await interaction.response.send_message("❌ This can only be used in a server.", ephemeral=True)
+            return
+
+        self.alliance_cursor.execute(
+            """
+            SELECT alliance_id, name
+            FROM alliance_list
+            WHERE discord_server_id = ?
+            ORDER BY name
+            """,
+            (interaction.guild_id,)
+        )
+        alliances = self.alliance_cursor.fetchall()
+
+        if not alliances:
+            await interaction.response.send_message("❌ No alliances found for this server.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🎁 Select Alliance",
+            description=f"Select the alliance to redeem `{gift_code}` for.",
+            color=discord.Color.gold()
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=GiftCodeAllianceSelectView(self, gift_code, alliances),
+            ephemeral=True
+        )
+
     async def redeem_gift_code_for_fid(self, fid: int, gift_code: str):
         time_val = int(datetime.now().timestamp())
         form = f"cdk={gift_code}&fid={fid}&time={time_val}"
@@ -152,17 +183,11 @@ class GiftOperations(commands.Cog):
 
                 return False, response_text
 
-    async def create_gift_code_for_alliance(self, interaction: discord.Interaction, gift_code: str, alliance_value: str):
+    async def create_gift_code_for_alliance(self, interaction: discord.Interaction, gift_code: str, alliance_id: int, alliance_name: str):
         if interaction.guild_id is None:
             await interaction.followup.send("❌ This can only be used in a server.", ephemeral=True)
             return
 
-        alliance = await self.get_alliance_by_input(alliance_value, interaction.guild_id)
-        if not alliance:
-            await interaction.followup.send("❌ Alliance not found for this server.", ephemeral=True)
-            return
-
-        alliance_id, alliance_name = alliance
         with sqlite3.connect('db/users.sqlite') as users_conn:
             users_cursor = users_conn.cursor()
             users_cursor.execute("SELECT fid FROM users WHERE alliance = ?", (alliance_id,))
@@ -239,15 +264,40 @@ class GiftMenuView(discord.ui.View):
             await interaction.response.send_message("❌ Settings menu not found.", ephemeral=True)
 
 
+class GiftCodeAllianceSelectView(discord.ui.View):
+    def __init__(self, cog, gift_code: str, alliances):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.add_item(GiftCodeAllianceSelect(cog, gift_code, alliances))
+
+
+class GiftCodeAllianceSelect(discord.ui.Select):
+    def __init__(self, cog, gift_code: str, alliances):
+        self.cog = cog
+        self.gift_code = gift_code
+        self.alliance_names = {str(alliance_id): name for alliance_id, name in alliances[:25]}
+        options = [
+            discord.SelectOption(label=name[:100], value=str(alliance_id))
+            for alliance_id, name in alliances[:25]
+        ]
+        super().__init__(
+            placeholder="Select an alliance",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        alliance_id = int(self.values[0])
+        alliance_name = self.alliance_names.get(self.values[0], f"Alliance {alliance_id}")
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self.cog.create_gift_code_for_alliance(interaction, self.gift_code, alliance_id, alliance_name)
+
+
 class CreateGiftCodeModal(discord.ui.Modal, title="Create Gift Code"):
     gift_code = discord.ui.TextInput(
         label="Gift Code",
         placeholder="Enter gift code",
-        max_length=100
-    )
-    alliance = discord.ui.TextInput(
-        label="Alliance",
-        placeholder="Enter alliance ID or exact alliance name",
         max_length=100
     )
 
@@ -257,20 +307,18 @@ class CreateGiftCodeModal(discord.ui.Modal, title="Create Gift Code"):
 
     async def on_submit(self, interaction: discord.Interaction):
         gift_code_value = str(self.gift_code.value).strip()
-        alliance_value = str(self.alliance.value).strip()
 
-        if not gift_code_value or not alliance_value:
-            await interaction.response.send_message("❌ Gift Code and Alliance are required.", ephemeral=True)
+        if not gift_code_value:
+            await interaction.response.send_message("❌ Gift Code is required.", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
         try:
-            await self.cog.create_gift_code_for_alliance(interaction, gift_code_value, alliance_value)
+            await self.cog.show_gift_code_alliance_select(interaction, gift_code_value)
         except Exception as e:
-            print(f"[ERROR] Failed to redeem gift code gift_code={gift_code_value} alliance={alliance_value}: {e}")
+            print(f"[ERROR] Failed to show alliance select for gift_code={gift_code_value}: {e}")
             traceback.print_exc()
-            await interaction.followup.send("❌ An error occurred while redeeming the gift code.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ An error occurred while loading alliances.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(GiftOperations(bot))
