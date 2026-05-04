@@ -98,6 +98,30 @@ class Permissions(commands.Cog):
         self.conn.commit()
         await interaction.response.send_message(f"✅ {user.mention} is now this server's admin.", ephemeral=True)
 
+    @admin.command(name="list", description="List this server's administrators")
+    async def admin_list(self, interaction: discord.Interaction):
+        if not await self._require_permission(interaction, "owner"):
+            return
+        if interaction.guild_id is None:
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+        self.cursor.execute(
+            "SELECT user_id, appointed_by, created_at FROM permissions WHERE guild_id = ? AND role = 'admin'",
+            (interaction.guild_id,)
+        )
+        rows = self.cursor.fetchall()
+        if not rows:
+            await interaction.response.send_message("No admins assigned for this server.", ephemeral=True)
+            return
+        embed = discord.Embed(title="🛡️ Server Admins", color=discord.Color.blue())
+        for user_id, appointed_by, created_at in rows:
+            embed.add_field(
+                name=f"<@{user_id}> (`{user_id}`)",
+                value=f"Appointed by: <@{appointed_by}>\nDate: `{created_at}`",
+                inline=False
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @admin.command(name="remove", description="Remove this server's administrator")
     @app_commands.describe(user="Admin to remove")
     async def admin_remove(self, interaction: discord.Interaction, user: discord.Member):
@@ -154,6 +178,30 @@ class Permissions(commands.Cog):
         )
         self.conn.commit()
         await interaction.response.send_message(f"✅ {user.mention} is now a server mod.", ephemeral=True)
+
+    @mod.command(name="list", description="List this server's moderators")
+    async def mod_list(self, interaction: discord.Interaction):
+        if not await self._require_permission(interaction, "admin"):
+            return
+        if interaction.guild_id is None:
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+        self.cursor.execute(
+            "SELECT user_id, appointed_by, created_at FROM permissions WHERE guild_id = ? AND role = 'mod'",
+            (interaction.guild_id,)
+        )
+        rows = self.cursor.fetchall()
+        if not rows:
+            await interaction.response.send_message("No mods assigned for this server.", ephemeral=True)
+            return
+        embed = discord.Embed(title="🔧 Server Mods", color=discord.Color.blue())
+        for user_id, appointed_by, created_at in rows:
+            embed.add_field(
+                name=f"<@{user_id}> (`{user_id}`)",
+                value=f"Appointed by: <@{appointed_by}>\nDate: `{created_at}`",
+                inline=False
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @mod.command(name="remove", description="Remove a server moderator")
     @app_commands.describe(user="Moderator to remove")
