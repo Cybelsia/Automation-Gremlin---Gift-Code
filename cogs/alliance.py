@@ -324,13 +324,13 @@ class SettingsMenuView(discord.ui.View):
         else:
             await self._missing_cog(interaction, "Support")
 
-    @discord.ui.button(label="Log System", emoji="📋", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Admin", emoji="🛡️", style=discord.ButtonStyle.secondary, row=3)
     async def log_system_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog = self.cog.bot.get_cog("LogSystem")
+        cog = self.cog.bot.get_cog("BotOperations")
         if cog:
-            await cog.show_log_system_menu(interaction)
+            await cog.show_bot_operations_menu(interaction)
         else:
-            await self._missing_cog(interaction, "Log System")
+            await self._missing_cog(interaction, "Admin")
 
 
 class AllianceOperationsView(discord.ui.View):
