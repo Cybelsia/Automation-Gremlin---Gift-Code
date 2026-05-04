@@ -189,14 +189,10 @@ class GiftOperations(commands.Cog):
     async def before_alliance_scheduler(self):
         await self.bot.wait_until_ready()
 
-    @tasks.loop(hours=1)
-    async def weekly_member_scan(self):
-        """Runs every hour but only executes on Sunday at 00:00 UTC."""
+    async def run_member_scan(self, label: str = "Weekly"):
+        """Runs the member scan for all alliances with a results channel. Called by scheduler and manual trigger."""
         now = datetime.utcnow()
-        if not (now.weekday() == 6 and now.hour == 0):
-            return
-
-        print(f"[WEEKLY SCAN] Starting member scan at {now}")
+        print(f"[{label.upper()} SCAN] Starting member scan at {now}")
         try:
             self.alliance_cursor.execute(
                 """
@@ -210,12 +206,12 @@ class GiftOperations(commands.Cog):
             for alliance_id, alliance_name, guild_id, results_channel_id in alliances:
                 guild = self.bot.get_guild(guild_id)
                 if guild is None:
-                    print(f"[WEEKLY SCAN] Guild {guild_id} not found for alliance {alliance_id}, skipping")
+                    print(f"[{label.upper()} SCAN] Guild {guild_id} not found for alliance {alliance_id}, skipping")
                     continue
 
                 results_channel = guild.get_channel(results_channel_id)
                 if results_channel is None:
-                    print(f"[WEEKLY SCAN] Results channel {results_channel_id} not found for alliance {alliance_id}, skipping")
+                    print(f"[{label.upper()} SCAN] Results channel {results_channel_id} not found for alliance {alliance_id}, skipping")
                     continue
 
                 with sqlite3.connect('db/users.sqlite') as users_conn:
@@ -227,7 +223,7 @@ class GiftOperations(commands.Cog):
                     members = users_cursor.fetchall()
 
                 if not members:
-                    print(f"[WEEKLY SCAN] No members for alliance {alliance_id}, skipping")
+                    print(f"[{label.upper()} SCAN] No members for alliance {alliance_id}, skipping")
                     continue
 
                 name_changes = []
@@ -278,38 +274,41 @@ class GiftOperations(commands.Cog):
                         await asyncio.sleep(1)
 
                     except Exception as e:
-                        print(f"[WEEKLY SCAN] Error fetching fid={fid}: {e}")
+                        print(f"[{label.upper()} SCAN] Error fetching fid={fid}: {e}")
                         errors.append(fid)
 
-                # Post results
                 embed = discord.Embed(
-                    title=f"📊 Weekly Member Scan — {alliance_name}",
+                    title=f"📊 {label} Member Scan — {alliance_name}",
                     description=f"Scan completed for `{len(members)}` members.",
                     color=discord.Color.blue()
                 )
-
                 if name_changes:
                     name_lines = "\n".join(f"FID `{fid}`: `{old}` → `{new}`" for fid, old, new in name_changes[:20])
                     embed.add_field(name=f"✏️ Name Changes ({len(name_changes)})", value=name_lines, inline=False)
                 else:
                     embed.add_field(name="✏️ Name Changes", value="None", inline=False)
-
                 if furnace_changes:
                     furnace_lines = "\n".join(f"FID `{fid}`: Lv `{old}` → Lv `{new}`" for fid, old, new in furnace_changes[:20])
                     embed.add_field(name=f"🔥 Furnace Changes ({len(furnace_changes)})", value=furnace_lines, inline=False)
                 else:
                     embed.add_field(name="🔥 Furnace Changes", value="None", inline=False)
-
                 if errors:
                     embed.add_field(name="⚠️ Errors", value=f"`{len(errors)}` members could not be fetched", inline=False)
-
                 embed.set_footer(text=f"Scan time: {now.strftime('%Y-%m-%d %H:%M UTC')}")
                 await results_channel.send(embed=embed)
-                print(f"[WEEKLY SCAN] Done for alliance {alliance_id} — {len(name_changes)} name changes, {len(furnace_changes)} furnace changes")
+                print(f"[{label.upper()} SCAN] Done for alliance {alliance_id} — {len(name_changes)} name changes, {len(furnace_changes)} furnace changes")
 
         except Exception as e:
-            print(f"[WEEKLY SCAN] Fatal error: {e}")
+            print(f"[{label.upper()} SCAN] Fatal error: {e}")
             traceback.print_exc()
+
+    @tasks.loop(hours=1)
+    async def weekly_member_scan(self):
+        """Runs every hour but only executes on Sunday at 00:00 UTC."""
+        now = datetime.utcnow()
+        if not (now.weekday() == 6 and now.hour == 0):
+            return
+        await self.run_member_scan(label="Weekly")
 
     @weekly_member_scan.before_loop
     async def before_weekly_member_scan(self):
@@ -905,6 +904,8 @@ class AutoGiftSettingsView(discord.ui.View):
     @discord.ui.button(label="Scan Gift Code Channel", emoji="🔍", style=discord.ButtonStyle.success, row=1)
     async def scan_gift_code_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.scan_gift_code_channel(interaction)
+
+
 
 
 class AutoGiftChannelSelectView(discord.ui.View):
