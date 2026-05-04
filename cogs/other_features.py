@@ -15,7 +15,7 @@ class OtherFeatures(commands.Cog):
                     "This section was created according to users' requests:\n\n"
                     "**Available Operations**\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "🆔 **FID Channel Lookup**\n"
+                    "🆔 **FID Number Lookup**\n"
                     "└ Create and manage FID lookup channels\n"
                     "└ Automatic ID verification system\n"
                     "└ Custom channel settings\n\n"
@@ -53,7 +53,7 @@ class OtherFeaturesView(discord.ui.View):
         self.cog = cog
 
     @discord.ui.button(
-        label="FID Channel Lookup",
+        label="FID Number Lookup",
         emoji="🆔",
         style=discord.ButtonStyle.primary,
         custom_id="id_channel",
