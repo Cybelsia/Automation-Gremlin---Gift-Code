@@ -70,7 +70,7 @@ class AllianceMemberOperations(commands.Cog):
         time_val = int(datetime.now().timestamp())
         form = f"fid={fid}&time={time_val}"
         sign = hashlib.md5((form + SECRET).encode('utf-8')).hexdigest()
-        form_data = {"sign": sign, "fid": str(fid), "time": str(time_val)}
+        form_data = f"fid={fid}&sign={sign}&time={time_val}"
         headers = {
             "accept": "application/json, text/plain, */*",
             "content-type": "application/x-www-form-urlencoded",
