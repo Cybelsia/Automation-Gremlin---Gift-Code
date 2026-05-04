@@ -11,7 +11,7 @@ from datetime import datetime
 import os
 import ssl
 import traceback
-from cogs.permissions import check_permission, BOT_OWNER_ID
+from cogs.permissions import check_permission
 
 SECRET = 'tB87#kPtkxqOS2'
 
@@ -129,7 +129,7 @@ class AllianceMemberOperations(commands.Cog):
             return [], [], False
 
         is_admin = check_permission(user_id, guild_id, "admin")
-        is_owner = (user_id == BOT_OWNER_ID)
+        is_owner = (user_id == 1237812594140512347)
 
         if is_owner or not is_admin:
             # Owner sees all alliances; mods see all alliances in the server

@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
+from cogs.permissions import BOT_OWNER_ID
 
-BOT_OWNER_ID = 1237812594140512347
 
 class SupportRequestModal(discord.ui.Modal, title="Support Request"):
     issue_type = discord.ui.TextInput(

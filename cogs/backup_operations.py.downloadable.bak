@@ -12,7 +12,7 @@ import tempfile
 import shutil
 import traceback
 import ssl
-from cogs.permissions import check_permission, BOT_OWNER_ID
+from cogs.permissions import check_permission
 
 class BackupOperations(commands.Cog):
     def __init__(self, bot):
@@ -52,73 +52,25 @@ class BackupOperations(commands.Cog):
     async def before_automatic_backup(self):
         await self.bot.wait_until_ready()
 
-    async def create_alliance_backup_zip(self, alliance_id: int, guild_id: int):
-        with sqlite3.connect("db/alliance.sqlite") as adb:
-            adb.row_factory = sqlite3.Row
-            acursor = adb.cursor()
-            acursor.execute("""
-                SELECT *
-                FROM alliance_list
-                WHERE alliance_id = ? AND discord_server_id = ?
-            """, (alliance_id, guild_id))
-            alliance_row = acursor.fetchone()
-
-        if not alliance_row:
-            raise ValueError("Alliance not found.")
-
-        with sqlite3.connect("db/users.sqlite") as udb:
-            udb.row_factory = sqlite3.Row
-            ucursor = udb.cursor()
-            ucursor.execute("""
-                SELECT *
-                FROM users
-                WHERE alliance = ?
-                ORDER BY fid
-            """, (alliance_id,))
-            users_rows = ucursor.fetchall()
-
-        alliance_data = dict(alliance_row)
-        users_data = [dict(row) for row in users_rows]
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in alliance_data.get("name", f"alliance_{alliance_id}"))
-        zip_path = os.path.join(tempfile.gettempdir(), f"{safe_name}_{alliance_id}_{timestamp}_backup.zip")
-
-        export_payload = {
-            "exported_at": timestamp,
-            "guild_id": guild_id,
-            "alliance": alliance_data,
-            "members_count": len(users_data)
-        }
-
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("alliance.json", json.dumps(export_payload, indent=2, default=str))
-            zf.writestr("members.json", json.dumps(users_data, indent=2, default=str))
-
-        return zip_path, alliance_data.get("name", f"Alliance {alliance_id}"), len(users_data)
-
     async def show_backup_menu(self, interaction: discord.Interaction):
         if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
             await interaction.response.send_message("❌ You don't have permission to use backup operations.", ephemeral=True)
             return
 
-        alliances = await get_available_alliances(interaction.user.id, interaction.guild_id)
-        if not alliances:
-            await interaction.response.send_message(
-                "❌ No alliances available for export.",
-                ephemeral=True
-            )
-            return
-
         embed = discord.Embed(
-            title="💾 Backup",
-            description="Choose which alliance you want to export.",
-            color=discord.Color.green()
+            title="💾 Backup System",
+            description=(
+                "Backup system is loaded.\n\n"
+                "**Available Operations**\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "🏠 **Main Menu**\n"
+                "└ Return to settings\n"
+                "━━━━━━━━━━━━━━━━━━━━━━"
+            ),
+            color=discord.Color.blue()
         )
-        await interaction.response.edit_message(
-            embed=embed,
-            view=ExportAllianceBackupView(alliances)
-        )
+        view = BackupMenuView(self)
+        await interaction.response.edit_message(embed=embed, view=view)
 
 
 
@@ -130,7 +82,7 @@ async def get_available_alliances(user_id: int, guild_id: int):
         return []
 
     is_admin = check_permission(user_id, guild_id, "admin")
-    is_owner = (user_id == BOT_OWNER_ID)
+    is_owner = (user_id == 1237812594140512347)
 
     with sqlite3.connect("db/alliance.sqlite") as adb:
         acursor = adb.cursor()
@@ -201,38 +153,12 @@ class AllianceSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        selected_id = int(self.values[0])
-        selected_label = self.alliance_map.get(str(selected_id), str(selected_id))
-
-        backup_cog = interaction.client.get_cog("BackupOperations")
-        if not backup_cog:
-            await interaction.response.send_message("❌ Backup system not available.", ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        try:
-            zip_path, alliance_name, member_count = await backup_cog.create_alliance_backup_zip(
-                selected_id,
-                interaction.guild_id
-            )
-
-            file = discord.File(
-                zip_path,
-                filename=os.path.basename(zip_path),
-                description=f"Backup export for {alliance_name}"
-            )
-
-            await interaction.followup.send(
-                content=f"✅ Backup ready for **{alliance_name}** (`{selected_id}`) with {member_count} members.",
-                file=file,
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.followup.send(
-                content=f"❌ Failed to create backup for **{selected_label}**: `{e}`",
-                ephemeral=True
-            )
+        selected_id = self.values[0]
+        selected_label = self.alliance_map.get(selected_id, selected_id)
+        await interaction.response.send_message(
+            f"✅ Selected alliance: **{selected_label}**\nAlliance ID: `{selected_id}`\nBackup export wiring comes next.",
+            ephemeral=True
+        )
 
 
 class ExportAllianceBackupView(discord.ui.View):

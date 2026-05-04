@@ -12,7 +12,7 @@ import tempfile
 import shutil
 import traceback
 import ssl
-from cogs.permissions import check_permission, BOT_OWNER_ID
+from cogs.permissions import check_permission
 
 class BackupOperations(commands.Cog):
     def __init__(self, bot):
@@ -102,23 +102,20 @@ class BackupOperations(commands.Cog):
             await interaction.response.send_message("❌ You don't have permission to use backup operations.", ephemeral=True)
             return
 
-        alliances = await get_available_alliances(interaction.user.id, interaction.guild_id)
-        if not alliances:
-            await interaction.response.send_message(
-                "❌ No alliances available for export.",
-                ephemeral=True
-            )
-            return
-
         embed = discord.Embed(
-            title="💾 Backup",
-            description="Choose which alliance you want to export.",
-            color=discord.Color.green()
+            title="💾 Backup System",
+            description=(
+                "Backup system is loaded.\n\n"
+                "**Available Operations**\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "🏠 **Main Menu**\n"
+                "└ Return to settings\n"
+                "━━━━━━━━━━━━━━━━━━━━━━"
+            ),
+            color=discord.Color.blue()
         )
-        await interaction.response.edit_message(
-            embed=embed,
-            view=ExportAllianceBackupView(alliances)
-        )
+        view = BackupMenuView(self)
+        await interaction.response.edit_message(embed=embed, view=view)
 
 
 
@@ -130,7 +127,7 @@ async def get_available_alliances(user_id: int, guild_id: int):
         return []
 
     is_admin = check_permission(user_id, guild_id, "admin")
-    is_owner = (user_id == BOT_OWNER_ID)
+    is_owner = (user_id == 1237812594140512347)
 
     with sqlite3.connect("db/alliance.sqlite") as adb:
         acursor = adb.cursor()

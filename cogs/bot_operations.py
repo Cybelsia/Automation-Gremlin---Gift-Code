@@ -6,10 +6,10 @@ import asyncio
 import requests
 from .alliance_member_operations import AllianceSelectView
 from cogs.permissions import check_permission
+from cogs.permissions import BOT_OWNER_ID
 
 VERSION_URL = "https://raw.githubusercontent.com/Reloisback/Whiteout-Survival-Discord-Bot/refs/heads/main/autoupdateinfo.txt"
 
-BOT_OWNER_ID = 1237812594140512347
 
 class AdminPanel(commands.Cog):
     def __init__(self, bot, conn):

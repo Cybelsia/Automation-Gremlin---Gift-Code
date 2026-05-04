@@ -1,3 +1,4 @@
+import os
 import sqlite3
 
 import discord
@@ -5,7 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 
-BOT_OWNER_ID = 1237812594140512347
+BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "1237812594140512347"))
 ROLE_LEVELS = {
     "mod": 1,
     "admin": 2,
