@@ -30,7 +30,8 @@ class Alliance(commands.Cog):
             CREATE TABLE IF NOT EXISTS alliance_list (
                 alliance_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
-                discord_server_id INTEGER
+                discord_server_id INTEGER,
+                refresh_rate INTEGER
             )
         """)
         self.conn.commit()
@@ -40,6 +41,9 @@ class Alliance(commands.Cog):
         columns = [info[1] for info in self.c.fetchall()]
         if "discord_server_id" not in columns:
             self.c.execute("ALTER TABLE alliance_list ADD COLUMN discord_server_id INTEGER")
+            self.conn.commit()
+        if "refresh_rate" not in columns:
+            self.c.execute("ALTER TABLE alliance_list ADD COLUMN refresh_rate INTEGER")
             self.conn.commit()
 
     @app_commands.command(name="settings", description="Open settings menu.")
@@ -227,6 +231,11 @@ class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
         placeholder="Enter alliance name",
         max_length=100
     )
+    refresh_rate = discord.ui.TextInput(
+        label="Refresh Rate",
+        placeholder="Enter refresh rate in seconds, e.g. 3600",
+        max_length=20
+    )
 
     def __init__(self, cog):
         super().__init__()
@@ -234,10 +243,15 @@ class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
 
     async def on_submit(self, interaction: discord.Interaction):
         name = str(self.alliance_name.value).strip()
-        print(f"[DEBUG] AddAllianceModal submitted guild_id={interaction.guild_id} user_id={interaction.user.id} name={name}")
+        refresh_rate_value = str(self.refresh_rate.value).strip()
+        print(f"[DEBUG] AddAllianceModal submitted guild_id={interaction.guild_id} user_id={interaction.user.id} name={name} refresh_rate={refresh_rate_value}")
 
         if not name:
             await interaction.response.send_message("❌ Alliance name is required.", ephemeral=True)
+            return
+
+        if not refresh_rate_value.isdigit() or int(refresh_rate_value) <= 0:
+            await interaction.response.send_message("❌ Refresh rate must be a positive number of seconds.", ephemeral=True)
             return
 
         if interaction.guild_id is None:
@@ -246,14 +260,14 @@ class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
 
         try:
             self.cog.c.execute(
-                "INSERT INTO alliance_list (name, discord_server_id) VALUES (?, ?)",
-                (name, interaction.guild_id)
+                "INSERT INTO alliance_list (name, discord_server_id, refresh_rate) VALUES (?, ?, ?)",
+                (name, interaction.guild_id, int(refresh_rate_value))
             )
             self.cog.conn.commit()
             print(f"[DEBUG] Added alliance guild_id={interaction.guild_id} name={name}")
             self.cog.c.execute(
                 """
-                SELECT alliance_id, name, discord_server_id
+                SELECT alliance_id, name, discord_server_id, refresh_rate
                 FROM alliance_list
                 WHERE name = ? AND discord_server_id = ?
                 """,
@@ -267,6 +281,7 @@ class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
                 color=discord.Color.green()
             )
             embed.add_field(name="Discord Server ID", value=f"`{interaction.guild_id}`", inline=False)
+            embed.add_field(name="Refresh Rate", value=f"`{refresh_rate_value}` seconds", inline=False)
             await interaction.response.send_message(embed=embed, ephemeral=True)
         except sqlite3.IntegrityError as e:
             print(f"[ERROR] Alliance INSERT integrity error guild_id={interaction.guild_id} name={name}: {e}")
