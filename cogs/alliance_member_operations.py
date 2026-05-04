@@ -260,7 +260,7 @@ class AllianceMemberOperations(commands.Cog):
         alliance_name = alliance[0] if alliance else f"Alliance {alliance_id}"
 
         self.c_users.execute("""
-            SELECT fid, nickname, furnace_lv, kid, discord_id
+            SELECT fid, nickname, furnace_lv, kid, discord_id, stove_lv_content
             FROM users
             WHERE alliance = ?
             ORDER BY nickname COLLATE NOCASE
@@ -272,12 +272,12 @@ class AllianceMemberOperations(commands.Cog):
             return
 
         embed = discord.Embed(
-            title=f"� {alliance_name} Members",
+            title=f"👥 {alliance_name} Members",
             description=f"Total members: `{len(members)}`",
             color=discord.Color.blue()
         )
-        for fid, nickname, furnace_lv, kid, discord_id in members[:25]:
-            discord_name = "No Discord"
+        for fid, nickname, furnace_lv, kid, discord_id, stove_lv_content in members[:25]:
+            discord_name = "None"
             if discord_id:
                 try:
                     discord_user = await self.bot.fetch_user(int(discord_id))
@@ -287,9 +287,19 @@ class AllianceMemberOperations(commands.Cog):
 
             embed.add_field(
                 name=nickname or str(fid),
-                value=f"FID: `{fid}` | Discord: `{discord_name}` | Furnace: `{furnace_lv}` | Kingdom: `{kid or 'Unknown'}`",
+                value=(
+                    f"FID: `{fid}`\n"
+                    f"Nickname: `{nickname or 'None'}`\n"
+                    f"Furnace LV: `{furnace_lv if furnace_lv is not None else 'None'}`\n"
+                    f"Stove Text: `{stove_lv_content or 'None'}`\n"
+                    f"Kingdom / KID: `{kid if kid is not None else 'None'}`\n"
+                    f"Discord: `{discord_name}`"
+                ),
                 inline=False
             )
+
+        if len(members) > 25:
+            embed.set_footer(text=f"Showing first 25 of {len(members)} members")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
