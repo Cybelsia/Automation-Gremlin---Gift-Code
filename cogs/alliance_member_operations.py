@@ -164,11 +164,62 @@ class AllianceMemberOperations(commands.Cog):
             alliance_id = int(view.current_select.values[0])
             if operation == "add":
                 await select_interaction.response.send_modal(AddAllianceMemberModal(self, alliance_id))
+            elif operation == "edit":
+                await self.show_member_select(select_interaction, alliance_id, "edit")
+            elif operation == "delete":
+                await self.show_member_select(select_interaction, alliance_id, "delete")
             else:
                 await self.show_alliance_members(select_interaction, alliance_id)
 
         view.callback = alliance_callback
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    async def show_member_select(self, interaction: discord.Interaction, alliance_id: int, operation: str):
+        self.c_alliance.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
+        alliance = self.c_alliance.fetchone()
+        alliance_name = alliance[0] if alliance else f"Alliance {alliance_id}"
+
+        self.c_users.execute("""
+            SELECT fid, nickname FROM users
+            WHERE alliance = ?
+            ORDER BY nickname COLLATE NOCASE
+        """, (alliance_id,))
+        members = self.c_users.fetchall()
+
+        if not members:
+            await interaction.response.send_message(f"❌ No members found in `{alliance_name}`.", ephemeral=True)
+            return
+
+        options = [
+            discord.SelectOption(label=f"{nickname or fid}"[:100], value=str(fid), description=f"FID: {fid}")
+            for fid, nickname in members[:25]
+        ]
+        select = discord.ui.Select(placeholder="Select a member", min_values=1, max_values=1, options=options)
+        view = discord.ui.View(timeout=180)
+
+        async def member_callback(select_interaction: discord.Interaction):
+            fid = int(select.values[0])
+            nickname = next((n for f, n in members if f == fid), str(fid))
+            if operation == "edit":
+                await select_interaction.response.send_modal(EditMemberModal(self, fid, nickname))
+            elif operation == "delete":
+                await self.confirm_delete_member(select_interaction, fid, nickname, alliance_name)
+
+        select.callback = member_callback
+        view.add_item(select)
+
+        title = "✏️ Select Member to Edit" if operation == "edit" else "🗑️ Select Member to Delete"
+        embed = discord.Embed(title=title, description=f"Alliance: `{alliance_name}`", color=discord.Color.blue())
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def confirm_delete_member(self, interaction: discord.Interaction, fid: int, nickname: str, alliance_name: str):
+        embed = discord.Embed(
+            title="⚠️ Confirm Member Deletion",
+            description=f"Are you sure you want to remove `{nickname}` (FID: `{fid}`) from `{alliance_name}`?",
+            color=discord.Color.orange()
+        )
+        view = ConfirmDeleteMemberView(self, fid, nickname)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     async def show_alliance_members(self, interaction: discord.Interaction, alliance_id: int):
         self.c_alliance.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
@@ -299,17 +350,82 @@ class MemberOperationsView(discord.ui.View):
     async def view_alliance_members_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_alliance_select(interaction, "view")
 
-    @discord.ui.button(label="Select Alliance", emoji="📋", style=discord.ButtonStyle.primary, row=0)
-    async def select_alliance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.show_alliance_select(interaction, "view")
+    @discord.ui.button(label="Edit Member", emoji="✏️", style=discord.ButtonStyle.secondary, row=1)
+    async def edit_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_alliance_select(interaction, "edit")
 
-    @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Delete Member", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
+    async def delete_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_alliance_select(interaction, "delete")
+
+    @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=2)
     async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         alliance_cog = self.cog.bot.get_cog("Alliance")
         if alliance_cog:
             await alliance_cog.show_main_menu(interaction)
         else:
             await interaction.response.send_message("❌ Settings menu not found.", ephemeral=True)
+
+
+class EditMemberModal(discord.ui.Modal, title="Edit Alliance Member"):
+    discord_id = discord.ui.TextInput(label="Discord ID", placeholder="Enter Discord user ID (or leave blank to clear)", max_length=20, required=False)
+
+    def __init__(self, cog, fid: int, nickname: str):
+        super().__init__()
+        self.cog = cog
+        self.fid = fid
+        self.nickname = nickname
+
+    async def on_submit(self, interaction: discord.Interaction):
+        discord_id_value = str(self.discord_id.value).strip()
+        if discord_id_value and not discord_id_value.isdigit():
+            await interaction.response.send_message("❌ Discord ID must be numeric.", ephemeral=True)
+            return
+        new_discord_id = int(discord_id_value) if discord_id_value else None
+        try:
+            self.cog.c_users.execute(
+                "UPDATE users SET discord_id = ? WHERE fid = ?",
+                (new_discord_id, self.fid)
+            )
+            self.cog.conn_users.commit()
+            embed = discord.Embed(
+                title="✅ Member Updated",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Player", value=f"`{self.nickname}`", inline=True)
+            embed.add_field(name="FID", value=f"`{self.fid}`", inline=True)
+            embed.add_field(name="Discord ID", value=f"`{new_discord_id}`" if new_discord_id else "`Cleared`", inline=True)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception as e:
+            print(f"[ERROR] EditMemberModal fid={self.fid}: {e}")
+            await interaction.response.send_message("❌ An error occurred while updating the member.", ephemeral=True)
+
+
+class ConfirmDeleteMemberView(discord.ui.View):
+    def __init__(self, cog, fid: int, nickname: str):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.fid = fid
+        self.nickname = nickname
+
+    @discord.ui.button(label="Confirm Delete", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            self.cog.c_users.execute("DELETE FROM users WHERE fid = ?", (self.fid,))
+            self.cog.conn_users.commit()
+            embed = discord.Embed(
+                title="✅ Member Removed",
+                description=f"`{self.nickname}` (FID: `{self.fid}`) has been removed.",
+                color=discord.Color.green()
+            )
+            await interaction.response.edit_message(embed=embed, view=None)
+        except Exception as e:
+            print(f"[ERROR] DeleteMember fid={self.fid}: {e}")
+            await interaction.response.edit_message(content="❌ An error occurred while deleting the member.", embed=None, view=None)
+
+    @discord.ui.button(label="Cancel", emoji="✖️", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Deletion cancelled.", embed=None, view=None)
 
 
 class AddAllianceMemberModal(discord.ui.Modal, title="Add Alliance Member"):
