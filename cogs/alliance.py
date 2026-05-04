@@ -52,15 +52,15 @@ class Alliance(commands.Cog):
             self.c.execute("ALTER TABLE alliance_list ADD COLUMN results_channel_id INTEGER")
             self.conn.commit()
 
-    @app_commands.command(name="settings", description="Open settings menu.")
-    async def settings(self, interaction: discord.Interaction):
+    @app_commands.command(name="menu", description="Open main menu.")
+    async def menu(self, interaction: discord.Interaction):
         try:
             if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
-                await interaction.response.send_message("❌ You don't have permission to use settings.", ephemeral=True)
+                await interaction.response.send_message("❌ You don't have permission to use the menu.", ephemeral=True)
                 return
 
             embed = discord.Embed(
-                title="⚙️ Settings Menu",
+                title="📋 Main Menu",
                 description="Please select a category.",
                 color=discord.Color.blue()
             )
@@ -69,12 +69,12 @@ class Alliance(commands.Cog):
             await interaction.response.send_message(embed=embed, view=view)
 
         except Exception as e:
-            print(f"Settings command error: {e}")
+            print(f"Menu command error: {e}")
 
     async def show_main_menu(self, interaction: discord.Interaction):
         try:
             embed = discord.Embed(
-                title="⚙️ Settings Menu",
+                title="📋 Main Menu",
                 description="Please select a category.",
                 color=discord.Color.blue()
             )
