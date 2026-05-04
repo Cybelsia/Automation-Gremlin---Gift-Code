@@ -759,22 +759,22 @@ class IDChannelView(discord.ui.View):
         label="Back",
         emoji="◀️",
         style=discord.ButtonStyle.secondary,
-        custom_id="back_to_other_features",
+        custom_id="back_to_wos_menu",
         row=2
     )
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            other_features_cog = self.cog.bot.get_cog("OtherFeatures")
-            if other_features_cog:
-                await other_features_cog.show_other_features_menu(interaction)
+            alliance_cog = self.cog.bot.get_cog("Alliance")
+            if alliance_cog:
+                await alliance_cog.show_wos_menu(interaction)
             else:
                 await interaction.response.send_message(
-                    "❌ Other Features module not found.",
+                    "❌ WOS menu not found.",
                     ephemeral=True
                 )
         except Exception as e:
             await interaction.response.send_message(
-                "❌ An error occurred while returning to Other Features menu.",
+                "❌ An error occurred while returning to WOS menu.",
                 ephemeral=True
             )
 

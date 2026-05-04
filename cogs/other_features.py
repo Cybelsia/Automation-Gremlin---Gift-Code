@@ -12,9 +12,10 @@ class OtherFeatures(commands.Cog):
             embed = discord.Embed(
                 title="🔧 Other Features",
                 description=(
-                    "This section was created according to users' requests:\n\n"
+                    "Please select an option.\n\n"
                     "**Available Operations**\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n"
+<<<<<<< HEAD
                     "🆔 **FID Channel Lookup**\n"
                     "└ Create and manage FID lookup channels\n"
                     "└ Automatic ID verification system\n"
@@ -27,6 +28,12 @@ class OtherFeatures(commands.Cog):
                     "└ Manually scan all alliance members\n"
                     "└ Checks for name and furnace changes\n"
                     "└ Posts results to each alliance results channel\n\n"
+=======
+                    "💾 **Backup System**\n"
+                    "└ Automatic database backup\n"
+                    "└ Secure backup storage\n"
+                    "└ Only for Global Admins\n"
+>>>>>>> 0f27573 (Restructure menu flow and move member tools under WOS)
                     "━━━━━━━━━━━━━━━━━━━━━━"
                 ),
                 color=discord.Color.blue()
@@ -53,6 +60,7 @@ class OtherFeaturesView(discord.ui.View):
         self.cog = cog
 
     @discord.ui.button(
+<<<<<<< HEAD
         label="FID Channel Lookup",
         emoji="🆔",
         style=discord.ButtonStyle.primary,
@@ -77,11 +85,13 @@ class OtherFeaturesView(discord.ui.View):
             )
 
     @discord.ui.button(
+=======
+>>>>>>> 0f27573 (Restructure menu flow and move member tools under WOS)
         label="Backup System",
         emoji="💾",
         style=discord.ButtonStyle.primary,
         custom_id="backup_system",
-        row=1
+        row=0
     )
     async def backup_system_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
@@ -124,7 +134,7 @@ class OtherFeaturesView(discord.ui.View):
         emoji="🏠",
         style=discord.ButtonStyle.secondary,
         custom_id="main_menu",
-        row=2
+        row=1
     )
     async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:

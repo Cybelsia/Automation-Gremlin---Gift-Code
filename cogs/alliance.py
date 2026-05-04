@@ -109,6 +109,19 @@ class Alliance(commands.Cog):
             if not interaction.response.is_done():
                 await interaction.response.send_message("❌ An error occurred while showing alliance operations.", ephemeral=True)
 
+    async def show_wos_menu(self, interaction: discord.Interaction):
+        try:
+            embed = discord.Embed(
+                title="⚔️ WOS Menu",
+                description="Please select a WOS category.",
+                color=discord.Color.blue()
+            )
+            view = WOSMenuView(self)
+            await interaction.response.edit_message(embed=embed, view=view)
+        except Exception as e:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ An error occurred while showing the WOS menu.", ephemeral=True)
+
     async def show_alliances(self, interaction: discord.Interaction):
         try:
             if interaction.guild_id is None:
@@ -280,10 +293,11 @@ class SettingsMenuView(discord.ui.View):
     async def _missing_cog(self, interaction: discord.Interaction, name: str):
         await interaction.response.send_message(f"❌ {name} module not found.", ephemeral=True)
 
-    @discord.ui.button(label="Alliance Operations", emoji="🏰", style=discord.ButtonStyle.primary, row=0)
-    async def alliance_operations_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.show_alliance_operations_menu(interaction)
+    @discord.ui.button(label="WOS", emoji="⚔️", style=discord.ButtonStyle.primary, row=0)
+    async def wos_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_wos_menu(interaction)
 
+<<<<<<< HEAD
     @discord.ui.button(label="Alliance Member Operations", emoji="👥", style=discord.ButtonStyle.primary, row=0)
     async def alliance_member_operations_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = self.cog.bot.get_cog("AllianceMemberOperations")
@@ -301,6 +315,9 @@ class SettingsMenuView(discord.ui.View):
             await self._missing_cog(interaction, "Gift Code Operations")
 
     @discord.ui.button(label="Other Features", emoji="🔧", style=discord.ButtonStyle.secondary, row=2)
+=======
+    @discord.ui.button(label="Other Features", emoji="�", style=discord.ButtonStyle.secondary, row=0)
+>>>>>>> 0f27573 (Restructure menu flow and move member tools under WOS)
     async def other_features_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = self.cog.bot.get_cog("OtherFeatures")
         if cog:
@@ -308,7 +325,7 @@ class SettingsMenuView(discord.ui.View):
         else:
             await self._missing_cog(interaction, "Other Features")
 
-    @discord.ui.button(label="Support", emoji="🎯", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Support", emoji="�", style=discord.ButtonStyle.secondary, row=1)
     async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = self.cog.bot.get_cog("SupportOperations")
         if cog:
@@ -316,6 +333,7 @@ class SettingsMenuView(discord.ui.View):
         else:
             await self._missing_cog(interaction, "Support")
 
+<<<<<<< HEAD
     @discord.ui.button(label="Admin", emoji="🛡️", style=discord.ButtonStyle.secondary, row=3)
     async def log_system_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = self.cog.bot.get_cog("AdminPanel")
@@ -323,6 +341,48 @@ class SettingsMenuView(discord.ui.View):
             await cog.show_admin_panel_menu(interaction)
         else:
             await self._missing_cog(interaction, "Admin")
+=======
+    @discord.ui.button(label="Admin", emoji="🛡️", style=discord.ButtonStyle.primary, row=1)
+    async def admin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = self.cog.bot.get_cog("BotOperations")
+        if cog:
+            await cog.show_bot_operations_menu(interaction)
+        else:
+            await self._missing_cog(interaction, "Admin")
+
+
+class WOSMenuView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def _missing_cog(self, interaction: discord.Interaction, name: str):
+        await interaction.response.send_message(f"❌ {name} module not found.", ephemeral=True)
+
+    @discord.ui.button(label="Alliance Operations", emoji="🏰", style=discord.ButtonStyle.primary, row=0)
+    async def alliance_operations_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_alliance_operations_menu(interaction)
+
+    @discord.ui.button(label="Alliance Member Operations", emoji="�", style=discord.ButtonStyle.primary, row=0)
+    async def alliance_member_operations_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = self.cog.bot.get_cog("AllianceMemberOperations")
+        if cog:
+            await cog.handle_member_operations(interaction)
+        else:
+            await self._missing_cog(interaction, "Alliance Member Operations")
+
+    @discord.ui.button(label="Gift Code Operations", emoji="�", style=discord.ButtonStyle.primary, row=1)
+    async def gift_code_operations_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = self.cog.bot.get_cog("GiftOperations")
+        if cog:
+            await cog.show_gift_menu(interaction)
+        else:
+            await self._missing_cog(interaction, "Gift Code Operations")
+
+    @discord.ui.button(label="Back", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_main_menu(interaction)
+>>>>>>> 0f27573 (Restructure menu flow and move member tools under WOS)
 
 
 class AllianceOperationsView(discord.ui.View):
