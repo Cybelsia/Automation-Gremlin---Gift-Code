@@ -302,9 +302,9 @@ class SettingsMenuView(discord.ui.View):
 
     @discord.ui.button(label="Bot Operations", emoji="🤖", style=discord.ButtonStyle.primary, row=1)
     async def bot_operations_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog = self.cog.bot.get_cog("BotOperations")
+        cog = self.cog.bot.get_cog("AdminPanel")
         if cog:
-            await cog.show_bot_operations_menu(interaction)
+            await cog.show_admin_panel_menu(interaction)
         else:
             await self._missing_cog(interaction, "Bot Operations")
 
@@ -326,9 +326,9 @@ class SettingsMenuView(discord.ui.View):
 
     @discord.ui.button(label="Admin", emoji="🛡️", style=discord.ButtonStyle.secondary, row=3)
     async def log_system_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog = self.cog.bot.get_cog("BotOperations")
+        cog = self.cog.bot.get_cog("AdminPanel")
         if cog:
-            await cog.show_bot_operations_menu(interaction)
+            await cog.show_admin_panel_menu(interaction)
         else:
             await self._missing_cog(interaction, "Admin")
 
