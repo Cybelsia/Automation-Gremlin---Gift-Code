@@ -107,18 +107,12 @@ class AllianceMemberOperations(commands.Cog):
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 "➕ **Add Alliance Member**\n"
                 "└ Add a member to an alliance\n\n"
-                "👥 **View Alliance Members**\n"
+                "� **View Alliance Members**\n"
                 "└ View members in an alliance\n\n"
-                "✏️ **Edit Member**\n"
-                "└ Edit an existing alliance member\n\n"
-                "🗑️ **Delete Member**\n"
-                "└ Delete an alliance member\n\n"
-                "🔍 **Member Scan**\n"
-                "└ Scan alliance members\n\n"
-                "🆔 **FID Number Lookup**\n"
-                "└ Look up member details by FID\n\n"
-                "⬅️ **Back**\n"
-                "└ Return to WOS menu\n"
+                "�📋 **Select Alliance**\n"
+                "└ Choose from alliances available to you\n\n"
+                "🏠 **Main Menu**\n"
+                "└ Return to settings\n"
                 "━━━━━━━━━━━━━━━━━━━━━━"
             ),
             color=discord.Color.blue()
@@ -211,7 +205,6 @@ class AllianceMemberOperations(commands.Cog):
         view.callback = alliance_callback
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-<<<<<<< HEAD
     async def show_member_select(self, interaction: discord.Interaction, alliance_id: int, operation: str):
         self.c_alliance.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
         alliance = self.c_alliance.fetchone()
@@ -219,138 +212,10 @@ class AllianceMemberOperations(commands.Cog):
 
         self.c_users.execute("""
             SELECT fid, nickname FROM users
-=======
-    async def show_edit_member_select(self, interaction: discord.Interaction):
-        await self.show_member_select(interaction, "edit")
-
-    async def show_delete_member_select(self, interaction: discord.Interaction):
-        await self.show_member_select(interaction, "delete")
-
-    async def show_member_scan(self, interaction: discord.Interaction):
-        await self.show_member_select(interaction, "scan_alliance")
-
-    async def show_fid_number_lookup(self, interaction: discord.Interaction):
-        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
-            await interaction.response.send_message("❌ You don't have permission to look up member FIDs.", ephemeral=True)
-            return
-        await interaction.response.send_modal(FIDLookupModal(self))
-
-    async def show_member_select(self, interaction: discord.Interaction, operation: str):
-        alliances, _, _ = await self.get_admin_alliances(interaction.user.id, interaction.guild_id)
-        if not alliances:
-            await interaction.response.send_message("❌ No alliances available for this operation.", ephemeral=True)
-            return
-
-        if operation == "scan_alliance":
-            embed = discord.Embed(
-                title="🔍 Select Alliance to Scan",
-                description="Select an alliance to manually scan and refresh all stored member data.",
-                color=discord.Color.blue()
-            )
-            view = AllianceSelectView(alliances, self)
-
-            async def scan_callback(select_interaction: discord.Interaction):
-                alliance_id = int(view.current_select.values[0])
-                await self.scan_alliance_members(select_interaction, alliance_id)
-
-            view.callback = scan_callback
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-            return
-
-        self.c_users.execute("""
-            SELECT u.fid, u.nickname, u.alliance, a.name
-            FROM users u
-            LEFT JOIN alliance_list a ON CAST(u.alliance AS TEXT) = CAST(a.alliance_id AS TEXT)
-            WHERE a.discord_server_id = ?
-            ORDER BY a.name COLLATE NOCASE, u.nickname COLLATE NOCASE
-        """, (interaction.guild_id,))
-        members = self.c_users.fetchall()
-        if not members:
-            await interaction.response.send_message("❌ No alliance members available for this operation.", ephemeral=True)
-            return
-
-        title = "✏️ Select Member to Edit" if operation == "edit" else "🗑️ Select Member to Delete"
-        embed = discord.Embed(
-            title=title,
-            description="Select a member from the dropdown below.",
-            color=discord.Color.blue() if operation == "edit" else discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed, view=MemberSelectView(self, members, operation), ephemeral=True)
-
-    async def get_member(self, fid: int):
-        self.c_users.execute("""
-            SELECT u.fid, u.nickname, u.furnace_lv, u.kid, u.stove_lv_content, u.alliance, u.discord_id, a.name
-            FROM users u
-            LEFT JOIN alliance_list a ON CAST(u.alliance AS TEXT) = CAST(a.alliance_id AS TEXT)
-            WHERE u.fid = ?
-        """, (fid,))
-        return self.c_users.fetchone()
-
-    async def update_member(self, interaction: discord.Interaction, original_fid: int, fid: int, nickname: str, furnace_lv: int, kid: int, stove_lv_content: str, discord_id: int):
-        try:
-            self.c_users.execute("""
-                UPDATE users
-                SET fid = ?, nickname = ?, furnace_lv = ?, kid = ?, stove_lv_content = ?, discord_id = ?
-                WHERE fid = ?
-            """, (fid, nickname, furnace_lv, kid, stove_lv_content, discord_id, original_fid))
-            self.conn_users.commit()
-        except sqlite3.IntegrityError:
-            await interaction.response.send_message("❌ Another member already uses that FID.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="✅ Member Updated",
-            description=f"`{nickname}` has been updated.",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="FID", value=f"`{fid}`", inline=True)
-        embed.add_field(name="Furnace Level", value=f"`{stove_lv_content or furnace_lv}`", inline=True)
-        embed.add_field(name="Kingdom ID", value=f"`{kid or 'Unknown'}`", inline=True)
-        embed.add_field(name="Discord ID", value=f"`{discord_id}`" if discord_id else "`None`", inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    async def confirm_delete_member(self, interaction: discord.Interaction, fid: int):
-        member = await self.get_member(fid)
-        if not member:
-            await interaction.response.send_message("❌ Member not found.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="⚠️ Confirm Member Deletion",
-            description=f"Are you sure you want to delete `{member[1] or fid}` from `{member[7] or 'Unknown Alliance'}`?",
-            color=discord.Color.orange()
-        )
-        await interaction.response.edit_message(embed=embed, view=ConfirmDeleteMemberView(self, fid))
-
-    async def delete_member(self, interaction: discord.Interaction, fid: int):
-        member = await self.get_member(fid)
-        if not member:
-            await interaction.response.edit_message(content="❌ Member not found.", embed=None, view=None)
-            return
-
-        self.c_users.execute("DELETE FROM users WHERE fid = ?", (fid,))
-        self.conn_users.commit()
-        embed = discord.Embed(
-            title="✅ Member Deleted",
-            description=f"Deleted `{member[1] or fid}` from `{member[7] or 'Unknown Alliance'}`.",
-            color=discord.Color.green()
-        )
-        await interaction.response.edit_message(embed=embed, view=None)
-
-    async def scan_alliance_members(self, interaction: discord.Interaction, alliance_id: int):
-        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
-            await interaction.response.send_message("❌ You don't have permission to scan alliance members.", ephemeral=True)
-            return
-
-        self.c_users.execute("""
-            SELECT fid, nickname, furnace_lv, kid, stove_lv_content, discord_id
-            FROM users
->>>>>>> 0f27573 (Restructure menu flow and move member tools under WOS)
             WHERE alliance = ?
             ORDER BY nickname COLLATE NOCASE
         """, (alliance_id,))
         members = self.c_users.fetchall()
-<<<<<<< HEAD
 
         if not members:
             await interaction.response.send_message(f"❌ No members found in `{alliance_name}`.", ephemeral=True)
@@ -386,72 +251,6 @@ class AllianceMemberOperations(commands.Cog):
         )
         view = ConfirmDeleteMemberView(self, fid, nickname)
         await interaction.response.edit_message(embed=embed, view=view)
-=======
-        if not members:
-            await interaction.response.send_message("❌ No members found for this alliance.", ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        updated = 0
-        failed = 0
-        changes = []
-
-        for fid, old_nickname, old_furnace_lv, old_kid, old_stove_lv_content, discord_id in members:
-            try:
-                player_data = await self.fetch_player_info(int(fid))
-                nickname = player_data.get('nickname')
-                furnace_lv = player_data.get('stove_lv', 0)
-                kid = player_data.get('kid', None)
-                stove_lv_content = player_data.get('stove_lv_content') or self.level_mapping.get(furnace_lv, str(furnace_lv))
-                self.c_users.execute("""
-                    UPDATE users
-                    SET nickname = ?, furnace_lv = ?, kid = ?, stove_lv_content = ?
-                    WHERE fid = ?
-                """, (nickname, furnace_lv, kid, stove_lv_content, fid))
-                updated += 1
-                if (nickname, furnace_lv, kid, stove_lv_content) != (old_nickname, old_furnace_lv, old_kid, old_stove_lv_content):
-                    changes.append(f"`{old_nickname or fid}` → `{nickname}` | `{old_furnace_lv}` → `{stove_lv_content}`")
-            except Exception as e:
-                failed += 1
-                print(f"[ERROR] Member scan failed fid={fid}: {e}")
-
-        self.conn_users.commit()
-        embed = discord.Embed(
-            title="🔍 Member Scan Complete",
-            color=discord.Color.green() if failed == 0 else discord.Color.orange()
-        )
-        embed.add_field(name="Members Checked", value=f"`{len(members)}`", inline=True)
-        embed.add_field(name="Updated", value=f"`{updated}`", inline=True)
-        embed.add_field(name="Failed", value=f"`{failed}`", inline=True)
-        if changes:
-            embed.add_field(name="Changes", value="\n".join(changes[:10]), inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    async def lookup_fid(self, interaction: discord.Interaction, fid: int):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            player_data = await self.fetch_player_info(fid)
-        except Exception as e:
-            print(f"[ERROR] FID lookup failed fid={fid}: {e}")
-            await interaction.followup.send("❌ Failed to fetch player information for that FID.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="🆔 FID Number Lookup",
-            description=f"Player information for FID `{fid}`.",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="Nickname", value=f"`{player_data.get('nickname') or 'Unknown'}`", inline=True)
-        embed.add_field(name="Furnace Level", value=f"`{player_data.get('stove_lv_content') or player_data.get('stove_lv', 'Unknown')}`", inline=True)
-        embed.add_field(name="Kingdom ID", value=f"`{player_data.get('kid') or 'Unknown'}`", inline=True)
-        avatar_image = player_data.get('avatar_image')
-        stove_lv_content = player_data.get('stove_lv_content')
-        if avatar_image:
-            embed.set_image(url=avatar_image)
-        if isinstance(stove_lv_content, str) and stove_lv_content.startswith("http"):
-            embed.set_thumbnail(url=stove_lv_content)
-        await interaction.followup.send(embed=embed, ephemeral=True)
->>>>>>> 0f27573 (Restructure menu flow and move member tools under WOS)
 
     async def show_alliance_members(self, interaction: discord.Interaction, alliance_id: int):
         self.c_alliance.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
@@ -574,9 +373,6 @@ class MemberOperationsView(discord.ui.View):
         super().__init__(timeout=300)
         self.cog = cog
 
-    async def _not_configured(self, interaction: discord.Interaction, operation: str):
-        await interaction.response.send_message(f"❌ {operation} is not configured in this build.", ephemeral=True)
-
     @discord.ui.button(label="Add Alliance Member", emoji="➕", style=discord.ButtonStyle.success, row=0)
     async def add_alliance_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_alliance_select(interaction, "add")
@@ -585,7 +381,6 @@ class MemberOperationsView(discord.ui.View):
     async def view_alliance_members_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_alliance_select(interaction, "view")
 
-<<<<<<< HEAD
     @discord.ui.button(label="Edit Member", emoji="✏️", style=discord.ButtonStyle.secondary, row=1)
     async def edit_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_alliance_select(interaction, "edit")
@@ -596,171 +391,11 @@ class MemberOperationsView(discord.ui.View):
 
     @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=2)
     async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-=======
-    @discord.ui.button(label="Edit Member", emoji="✏️", style=discord.ButtonStyle.primary, row=1)
-    async def edit_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if hasattr(self.cog, "show_edit_member_select"):
-            await self.cog.show_edit_member_select(interaction)
-        else:
-            await self._not_configured(interaction, "Edit Member")
-
-    @discord.ui.button(label="Delete Member", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
-    async def delete_member_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if hasattr(self.cog, "show_delete_member_select"):
-            await self.cog.show_delete_member_select(interaction)
-        else:
-            await self._not_configured(interaction, "Delete Member")
-
-    @discord.ui.button(label="Member Scan", emoji="🔍", style=discord.ButtonStyle.primary, row=2)
-    async def member_scan_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if hasattr(self.cog, "show_member_scan"):
-            await self.cog.show_member_scan(interaction)
-        elif hasattr(self.cog, "member_scan"):
-            await self.cog.member_scan(interaction)
-        else:
-            await self._not_configured(interaction, "Member Scan")
-
-    @discord.ui.button(label="FID Number Lookup", emoji="🆔", style=discord.ButtonStyle.primary, row=2)
-    async def fid_number_lookup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if hasattr(self.cog, "show_fid_number_lookup"):
-            await self.cog.show_fid_number_lookup(interaction)
-        elif hasattr(self.cog, "fid_number_lookup"):
-            await self.cog.fid_number_lookup(interaction)
-        else:
-            await self._not_configured(interaction, "FID Number Lookup")
-
-    @discord.ui.button(label="Back", emoji="⬅️", style=discord.ButtonStyle.secondary, row=3)
-    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
->>>>>>> 0f27573 (Restructure menu flow and move member tools under WOS)
         alliance_cog = self.cog.bot.get_cog("Alliance")
         if alliance_cog:
-            await alliance_cog.show_wos_menu(interaction)
+            await alliance_cog.show_main_menu(interaction)
         else:
-            await interaction.response.send_message("❌ WOS menu not found.", ephemeral=True)
-
-
-class MemberSelectView(discord.ui.View):
-    def __init__(self, cog, members, operation: str):
-        super().__init__(timeout=180)
-        self.cog = cog
-        self.members = members
-        self.operation = operation
-        self.add_member_select()
-
-    def add_member_select(self):
-        options = [
-            discord.SelectOption(
-                label=(nickname or str(fid))[:100],
-                value=str(fid),
-                description=f"{alliance_name or 'Unknown Alliance'} | FID {fid}"[:100]
-            )
-            for fid, nickname, alliance_id, alliance_name in self.members[:25]
-        ]
-        select = discord.ui.Select(
-            placeholder="Select a member",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-
-        async def select_callback(interaction: discord.Interaction):
-            fid = int(select.values[0])
-            if self.operation == "edit":
-                member = await self.cog.get_member(fid)
-                if not member:
-                    await interaction.response.send_message("❌ Member not found.", ephemeral=True)
-                    return
-                await interaction.response.send_modal(EditMemberModal(self.cog, member))
-            elif self.operation == "delete":
-                await self.cog.confirm_delete_member(interaction, fid)
-            else:
-                await interaction.response.send_message("❌ No action configured for this selection.", ephemeral=True)
-
-        select.callback = select_callback
-        self.add_item(select)
-
-
-class EditMemberModal(discord.ui.Modal):
-    def __init__(self, cog, member):
-        super().__init__(title="Edit Member")
-        self.cog = cog
-        self.original_fid = int(member[0])
-        self.fid = discord.ui.TextInput(label="FID", default=str(member[0]), max_length=20)
-        self.nickname = discord.ui.TextInput(label="Nickname", default=str(member[1] or ""), max_length=100)
-        self.furnace_lv = discord.ui.TextInput(label="Furnace Level", default=str(member[2] or 0), max_length=10)
-        self.kid = discord.ui.TextInput(label="Kingdom ID", default=str(member[3] or ""), max_length=20, required=False)
-        self.discord_id = discord.ui.TextInput(label="Discord ID", default=str(member[6] or ""), max_length=20, required=False)
-        self.add_item(self.fid)
-        self.add_item(self.nickname)
-        self.add_item(self.furnace_lv)
-        self.add_item(self.kid)
-        self.add_item(self.discord_id)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        fid_value = str(self.fid.value).strip()
-        nickname_value = str(self.nickname.value).strip()
-        furnace_value = str(self.furnace_lv.value).strip()
-        kid_value = str(self.kid.value).strip()
-        discord_id_value = str(self.discord_id.value).strip()
-
-        if not fid_value.isdigit():
-            await interaction.response.send_message("❌ FID must be numeric.", ephemeral=True)
-            return
-        if not nickname_value:
-            await interaction.response.send_message("❌ Nickname is required.", ephemeral=True)
-            return
-        if not furnace_value.isdigit():
-            await interaction.response.send_message("❌ Furnace level must be numeric.", ephemeral=True)
-            return
-        if kid_value and not kid_value.isdigit():
-            await interaction.response.send_message("❌ Kingdom ID must be numeric if provided.", ephemeral=True)
-            return
-        if discord_id_value and not discord_id_value.isdigit():
-            await interaction.response.send_message("❌ Discord ID must be numeric if provided.", ephemeral=True)
-            return
-
-        furnace_lv = int(furnace_value)
-        stove_lv_content = self.cog.level_mapping.get(furnace_lv, str(furnace_lv))
-        await self.cog.update_member(
-            interaction,
-            self.original_fid,
-            int(fid_value),
-            nickname_value,
-            furnace_lv,
-            int(kid_value) if kid_value else None,
-            stove_lv_content,
-            int(discord_id_value) if discord_id_value else None
-        )
-
-
-class ConfirmDeleteMemberView(discord.ui.View):
-    def __init__(self, cog, fid: int):
-        super().__init__(timeout=180)
-        self.cog = cog
-        self.fid = fid
-
-    @discord.ui.button(label="Confirm Delete", emoji="🗑️", style=discord.ButtonStyle.danger)
-    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.delete_member(interaction, self.fid)
-
-    @discord.ui.button(label="Cancel", emoji="✖️", style=discord.ButtonStyle.secondary)
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="Deletion cancelled.", embed=None, view=None)
-
-
-class FIDLookupModal(discord.ui.Modal, title="FID Number Lookup"):
-    fid = discord.ui.TextInput(label="FID", placeholder="Enter player FID", max_length=20)
-
-    def __init__(self, cog):
-        super().__init__()
-        self.cog = cog
-
-    async def on_submit(self, interaction: discord.Interaction):
-        fid_value = str(self.fid.value).strip()
-        if not fid_value.isdigit():
-            await interaction.response.send_message("❌ FID must be numeric.", ephemeral=True)
-            return
-        await self.cog.lookup_fid(interaction, int(fid_value))
+            await interaction.response.send_message("❌ Settings menu not found.", ephemeral=True)
 
 
 class EditMemberModal(discord.ui.Modal, title="Edit Alliance Member"):
