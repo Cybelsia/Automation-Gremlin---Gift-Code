@@ -74,7 +74,9 @@ class AllianceMemberOperations(commands.Cog):
         headers = {
             "accept": "application/json, text/plain, */*",
             "content-type": "application/x-www-form-urlencoded",
-            "origin": "https://wos-giftcode.centurygame.com"
+            "origin": "https://wos-giftcode.centurygame.com",
+            "referer": "https://wos-giftcode.centurygame.com/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
         ssl_context = ssl.create_default_context()
