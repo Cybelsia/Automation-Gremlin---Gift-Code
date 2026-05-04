@@ -1,6 +1,70 @@
 import discord
 from discord.ext import commands
 
+BOT_OWNER_ID = 1237812594140512347
+
+class SupportRequestModal(discord.ui.Modal, title="Support Request"):
+    issue_type = discord.ui.TextInput(
+        label="Issue Type",
+        placeholder="Bug / Feature Request / Question / Other",
+        max_length=50,
+        required=True
+    )
+    summary = discord.ui.TextInput(
+        label="Short Summary",
+        placeholder="One line describing your issue",
+        max_length=100,
+        required=True
+    )
+    details = discord.ui.TextInput(
+        label="Details",
+        placeholder="What happened? What did you expect? Any extra info...",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
+        required=True
+    )
+
+    def __init__(self, bot):
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            owner = await self.bot.fetch_user(BOT_OWNER_ID)
+            if owner:
+                dm_embed = discord.Embed(
+                    title="📩 Support Request",
+                    color=discord.Color.blue()
+                )
+                dm_embed.description = (
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 **From:** {interaction.user} (`{interaction.user.id}`)\n"
+                    f"🌐 **Server:** {interaction.guild.name} (`{interaction.guild_id}`)\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📋 **Type:** {self.issue_type.value}\n"
+                    f"📌 **Summary:** {self.summary.value}\n"
+                    f"📝 **Details:**\n{self.details.value}\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━"
+                )
+                await owner.send(embed=dm_embed)
+
+            await interaction.response.send_message(
+                "✅ Your support request has been sent. You will be contacted if needed.",
+                ephemeral=True
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ Could not deliver your request. Please try again later.",
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"Error sending support request: {e}")
+            await interaction.response.send_message(
+                "❌ An error occurred while sending your request.",
+                ephemeral=True
+            )
+
+
 class SupportOperations(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -13,54 +77,21 @@ class SupportOperations(commands.Cog):
                 "**Available Operations**\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 "📝 **Request Support**\n"
-                "└ Get help and support\n\n"
-                "👨‍💻 **Developer About**\n"
-                "└ Developer information\n"
+                "└ Submit a support request\n\n"
+                "📖 **About Original Bot**\n"
+                "└ About the original bot and its developer\n"
                 "━━━━━━━━━━━━━━━━━━━━━━"
             ),
             color=discord.Color.blue()
         )
 
         view = SupportView(self)
-        
+
         try:
             await interaction.response.edit_message(embed=support_menu_embed, view=view)
         except discord.errors.InteractionResponded:
             await interaction.message.edit(embed=support_menu_embed, view=view)
 
-    async def show_support_info(self, interaction: discord.Interaction):
-        support_embed = discord.Embed(
-            title="🤖 Bot Support Information",
-            description=(
-                "Hello! If you need help with the bot or are experiencing any issues, "
-                "you can always contact me.\n\n"
-                "**Discord Server:** [Click Here](https://discord.gg/h8w6N6my4a)\n"
-                "**Developer Contact:** Discord Username: Reloisback\n\n"
-                "Our bot's source code is always 100% open source. "
-                "This bot was created and published by Reloisback for free and "
-                "**WILL ALWAYS BE FREE.**\n\n"
-                "If you would like to support us\n"
-                "[☕ Buy me a coffee](https://www.buymeacoffee.com/reloisback)\n\n"
-                "You can always support by clicking this link.\n"
-                "Thank you for using my bot.\n"
-                "Feel free to contact me anytime for support."
-            ),
-            color=discord.Color.gold()
-        )
-
-        support_embed.set_thumbnail(url="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png")
-        
-        try:
-            await interaction.response.send_message(embed=support_embed, ephemeral=True)
-            try:
-                await interaction.user.send(embed=support_embed)
-            except discord.Forbidden:
-                await interaction.followup.send(
-                    "❌ Could not send DM because your DMs are closed!",
-                    ephemeral=True
-                )
-        except Exception as e:
-            print(f"Error sending support info: {e}")
 
 class SupportView(discord.ui.View):
     def __init__(self, cog):
@@ -74,57 +105,36 @@ class SupportView(discord.ui.View):
         custom_id="request_support"
     )
     async def support_request_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.show_support_info(interaction)
+        await interaction.response.send_modal(SupportRequestModal(self.cog.bot))
 
     @discord.ui.button(
-        label="Developer About",
-        emoji="👨‍💻",
+        label="About Original Bot",
+        emoji="📖",
         style=discord.ButtonStyle.primary,
         custom_id="developer_about"
     )
     async def developer_about_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         about_embed = discord.Embed(
-            title="👨‍💻 About the Developer",
+            title="📖 About the Original Bot",
             description=(
-                "Thank you for clicking this button, as it shows your interest in learning "
-                "about the person behind this bot.\n\n"
-                "**Personal Introduction**\n"
+                "This bot is based on the original Whiteout Survival Discord Bot "
+                "created by **Reloisback**. This version has been customised and extended "
+                "but the original work and foundation belongs to them.\n\n"
+                "**Original Developer**\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "I'm Umut, a 27-year-old developer specializing in Python and PHP. "
-                "While I used to be an avid gamer, my responsibilities as a family provider "
-                "have shifted my priorities, leaving limited time for gaming.\n\n"
-                "**Bot's Journey**\n"
+                "👤 **Developer:** Reloisback\n"
+                "🌐 **Discord Server:** [Click Here](https://discord.gg/h8w6N6my4a)\n\n"
+                "**Support the Original Developer**\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "White of Survival bot started as a fun project for my own alliance. "
-                "Upon realizing there wasn't anything similar available, I decided to develop "
-                "it further and share it with the community. You're currently experiencing "
-                "Version 4, following successful releases of V1, V2, and V3.\n\n"
-                "The development process has been intense, ranging from 1-2 hours some days "
-                "to marathon 14-15 hour coding sessions.\n\n"
-                "**Why Free?**\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "I'm often asked why I keep this bot free. The answer is simple: accessibility. "
-                "If monetized, the user base would shrink from thousands to perhaps just 10-15 users. "
-                "Having experienced financial constraints myself, I understand the importance of "
-                "making useful tools available to everyone, regardless of their financial situation.\n\n"
-                "**Support & Development**\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "For those who can and wish to support the project, you can use the "
-                "[☕ Buy me a coffee](https://www.buymeacoffee.com/reloisback) link. "
-                "These contributions help cover development costs (proxies, servers, testing) "
-                "and support my family.\n\n"
-                "**Final Words**\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "To those unable to provide financial support - thank you for using the bot! "
-                "Support has never been and will never be mandatory. This project will remain "
-                "free forever.\n\n"
-                "I love this community and thank you all for being part of this journey. ❤️"
+                "The original bot is and always will be free. If you'd like to support "
+                "the original developer:\n"
+                "[☕ Buy me a coffee](https://www.buymeacoffee.com/reloisback)\n"
+                "━━━━━━━━━━━━━━━━━━━━━━"
             ),
             color=discord.Color.purple()
         )
+        about_embed.set_footer(text="Original bot made with ❤️ by Reloisback")
 
-        about_embed.set_footer(text="Made with ❤️ by Reloisback")
-        
         try:
             await interaction.response.send_message(embed=about_embed, ephemeral=True)
             try:
@@ -153,5 +163,6 @@ class SupportView(discord.ui.View):
                 await interaction.message.edit(content=None, embed=None, view=None)
                 await alliance_cog.show_main_menu(interaction)
 
+
 async def setup(bot):
-    await bot.add_cog(SupportOperations(bot)) 
+    await bot.add_cog(SupportOperations(bot))
