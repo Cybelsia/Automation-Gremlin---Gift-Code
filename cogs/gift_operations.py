@@ -92,6 +92,101 @@ class GiftOperations(commands.Cog):
         if not os.path.exists(self.log_directory):
             os.makedirs(self.log_directory)
 
+        # Per-alliance scheduler: tracks last run time keyed by alliance_id
+        self._last_run: dict[int, float] = {}
+        self.alliance_scheduler.start()
+
+    def cog_unload(self):
+        self.alliance_scheduler.cancel()
+
+    @tasks.loop(seconds=60)
+    async def alliance_scheduler(self):
+        """Runs every 60 seconds. For each alliance, checks if its refresh_rate has elapsed
+        since last run, then scans its gift code channel and redeems any found codes."""
+        try:
+            now = asyncio.get_event_loop().time()
+            self.alliance_cursor.execute(
+                """
+                SELECT alliance_id, name, discord_server_id, refresh_rate,
+                       gift_code_channel_id, results_channel_id
+                FROM alliance_list
+                WHERE gift_code_channel_id IS NOT NULL
+                  AND refresh_rate IS NOT NULL
+                  AND refresh_rate > 0
+                """
+            )
+            alliances = self.alliance_cursor.fetchall()
+
+            for alliance_id, name, guild_id, refresh_rate, gift_channel_id, results_channel_id in alliances:
+                last_run = self._last_run.get(alliance_id, 0)
+                if now - last_run < refresh_rate:
+                    continue
+
+                self._last_run[alliance_id] = now
+                guild = self.bot.get_guild(guild_id)
+                if guild is None:
+                    print(f"[SCHEDULER] Guild {guild_id} not found for alliance {alliance_id}, skipping")
+                    continue
+
+                gift_channel = guild.get_channel(gift_channel_id)
+                if gift_channel is None:
+                    print(f"[SCHEDULER] Gift code channel {gift_channel_id} not found for alliance {alliance_id}, skipping")
+                    continue
+
+                results_channel = guild.get_channel(results_channel_id) if results_channel_id else gift_channel
+
+                print(f"[SCHEDULER] Scanning alliance_id={alliance_id} name={name} channel={gift_channel_id}")
+
+                found_codes = []
+                async for message in gift_channel.history(limit=50):
+                    code = self.extract_auto_gift_code(message.content)
+                    if code and code not in found_codes:
+                        found_codes.append(code)
+
+                if not found_codes:
+                    print(f"[SCHEDULER] No codes found for alliance_id={alliance_id}")
+                    continue
+
+                # Redeem only for this specific alliance
+                with sqlite3.connect('db/users.sqlite') as users_conn:
+                    users_cursor = users_conn.cursor()
+                    users_cursor.execute("SELECT fid FROM users WHERE alliance = ?", (alliance_id,))
+                    members = users_cursor.fetchall()
+
+                if not members:
+                    print(f"[SCHEDULER] No members for alliance_id={alliance_id}, skipping")
+                    continue
+
+                total_success = 0
+                total_failed = 0
+                for gift_code in found_codes:
+                    for (fid,) in members:
+                        ok, _ = await self.redeem_gift_code_for_fid(fid, gift_code)
+                        if ok:
+                            total_success += 1
+                        else:
+                            total_failed += 1
+                        await asyncio.sleep(1)
+
+                embed = discord.Embed(
+                    title="⏰ Scheduled Gift Code Redemption",
+                    description=f"Alliance: `{name}`",
+                    color=discord.Color.green() if total_failed == 0 else discord.Color.orange()
+                )
+                embed.add_field(name="Codes Found", value=f"`{len(found_codes)}`", inline=True)
+                embed.add_field(name="Members Processed", value=f"`{len(members)}`", inline=True)
+                embed.add_field(name="Succeeded", value=f"`{total_success}`", inline=True)
+                embed.add_field(name="Failed", value=f"`{total_failed}`", inline=True)
+                await results_channel.send(embed=embed)
+
+        except Exception as e:
+            print(f"[SCHEDULER] Error in alliance_scheduler: {e}")
+            traceback.print_exc()
+
+    @alliance_scheduler.before_loop
+    async def before_alliance_scheduler(self):
+        await self.bot.wait_until_ready()
+
     async def show_gift_menu(self, interaction: discord.Interaction):
         gift_menu_embed = discord.Embed(
             title="🎁 Gift Code Operations",
