@@ -153,6 +153,52 @@ class Alliance(commands.Cog):
             if not interaction.response.is_done():
                 await interaction.response.send_message("❌ An error occurred while opening the alliance modal.", ephemeral=True)
 
+    async def show_edit_alliance_select(self, interaction: discord.Interaction):
+        try:
+            if interaction.guild_id is None:
+                await interaction.response.send_message("❌ This can only be used in a server.", ephemeral=True)
+                return
+            self.c.execute(
+                """
+                SELECT alliance_id, name, refresh_rate, gift_code_channel_id, results_channel_id
+                FROM alliance_list
+                WHERE discord_server_id = ?
+                ORDER BY name
+                """,
+                (interaction.guild_id,)
+            )
+            alliances = self.c.fetchall()
+            if not alliances:
+                await interaction.response.send_message("❌ No alliances found to edit.", ephemeral=True)
+                return
+            embed = discord.Embed(
+                title="✏️ Edit Alliance",
+                description="Select an alliance to edit.",
+                color=discord.Color.blue()
+            )
+            await interaction.response.send_message(embed=embed, view=EditAllianceSelectView(self, alliances), ephemeral=True)
+        except Exception as e:
+            print(f"[ERROR] show_edit_alliance_select: {e}")
+            traceback.print_exc()
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ An error occurred while loading alliances.", ephemeral=True)
+
+    async def show_edit_alliance_menu(self, interaction: discord.Interaction, alliance_id: int, name: str, refresh_rate, gift_code_channel_id, results_channel_id):
+        gift_ch = f"<#{gift_code_channel_id}>" if gift_code_channel_id else "`Not set`"
+        results_ch = f"<#{results_channel_id}>" if results_channel_id else "`Not set`"
+        embed = discord.Embed(
+            title=f"✏️ Editing: {name}",
+            description="Choose what you want to update.",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Refresh Rate", value=f"`{refresh_rate}` seconds" if refresh_rate else "`Not set`", inline=False)
+        embed.add_field(name="Gift Code Channel", value=gift_ch, inline=False)
+        embed.add_field(name="Results Channel", value=results_ch, inline=False)
+        await interaction.response.edit_message(
+            embed=embed,
+            view=EditAllianceMenuView(self, alliance_id, name, refresh_rate, gift_code_channel_id, results_channel_id)
+        )
+
     async def show_delete_alliance_select(self, interaction: discord.Interaction):
         try:
             if interaction.guild_id is None:
@@ -301,13 +347,172 @@ class AllianceOperationsView(discord.ui.View):
     async def view_alliances_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_alliances(interaction)
 
+    @discord.ui.button(label="Edit Alliance", emoji="✏️", style=discord.ButtonStyle.secondary, row=1)
+    async def edit_alliance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_edit_alliance_select(interaction)
+
     @discord.ui.button(label="Delete Alliance", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
     async def delete_alliance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_delete_alliance_select(interaction)
 
-    @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=2)
     async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_main_menu(interaction)
+
+
+class EditAllianceSelectView(discord.ui.View):
+    def __init__(self, cog, alliances):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.add_item(EditAllianceSelect(cog, alliances))
+
+
+class EditAllianceSelect(discord.ui.Select):
+    def __init__(self, cog, alliances):
+        self.cog = cog
+        self.alliance_data = {str(a[0]): a for a in alliances[:25]}
+        options = [
+            discord.SelectOption(label=a[1][:100], value=str(a[0]))
+            for a in alliances[:25]
+        ]
+        super().__init__(placeholder="Select an alliance to edit", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        a = self.alliance_data[self.values[0]]
+        alliance_id, name, refresh_rate, gift_code_channel_id, results_channel_id = a
+        await self.cog.show_edit_alliance_menu(interaction, alliance_id, name, refresh_rate, gift_code_channel_id, results_channel_id)
+
+
+class EditAllianceMenuView(discord.ui.View):
+    def __init__(self, cog, alliance_id: int, name: str, refresh_rate, gift_code_channel_id, results_channel_id):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.name = name
+        self.refresh_rate = refresh_rate
+        self.gift_code_channel_id = gift_code_channel_id
+        self.results_channel_id = results_channel_id
+
+    @discord.ui.button(label="Edit Name / Refresh Rate", emoji="✏️", style=discord.ButtonStyle.primary, row=0)
+    async def edit_name_refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            EditAllianceModal(self.cog, self.alliance_id, self.name, self.refresh_rate)
+        )
+
+    @discord.ui.button(label="Set Gift Code Channel", emoji="📢", style=discord.ButtonStyle.primary, row=0)
+    async def edit_gift_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="📢 Select Gift Code Channel",
+            description="Choose the channel where gift codes will be picked up.",
+            color=discord.Color.gold()
+        )
+        await interaction.response.edit_message(embed=embed, view=EditGiftCodeChannelView(self.cog, self.alliance_id, self.name))
+
+    @discord.ui.button(label="Set Results Channel", emoji="📊", style=discord.ButtonStyle.primary, row=1)
+    async def edit_results_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="📊 Select Results Channel",
+            description="Choose the channel where redemption results will be posted.",
+            color=discord.Color.gold()
+        )
+        await interaction.response.edit_message(embed=embed, view=EditResultsChannelView(self.cog, self.alliance_id, self.name))
+
+
+class EditAllianceModal(discord.ui.Modal, title="Edit Alliance"):
+    alliance_name = discord.ui.TextInput(label="Alliance Name", placeholder="Enter new name", max_length=100)
+    refresh_rate = discord.ui.TextInput(label="Refresh Rate (seconds)", placeholder="e.g. 3600", max_length=20)
+
+    def __init__(self, cog, alliance_id: int, current_name: str, current_refresh_rate):
+        super().__init__()
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name.default = current_name
+        self.refresh_rate.default = str(current_refresh_rate) if current_refresh_rate else ""
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = str(self.alliance_name.value).strip()
+        refresh_rate_value = str(self.refresh_rate.value).strip()
+        if not name:
+            await interaction.response.send_message("❌ Alliance name is required.", ephemeral=True)
+            return
+        if not refresh_rate_value.isdigit() or int(refresh_rate_value) <= 0:
+            await interaction.response.send_message("❌ Refresh rate must be a positive number of seconds.", ephemeral=True)
+            return
+        try:
+            self.cog.c.execute(
+                "UPDATE alliance_list SET name = ?, refresh_rate = ? WHERE alliance_id = ?",
+                (name, int(refresh_rate_value), self.alliance_id)
+            )
+            self.cog.conn.commit()
+            embed = discord.Embed(
+                title="✅ Alliance Updated",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Name", value=f"`{name}`", inline=False)
+            embed.add_field(name="Refresh Rate", value=f"`{refresh_rate_value}` seconds", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except sqlite3.IntegrityError:
+            await interaction.response.send_message("❌ An alliance with that name already exists.", ephemeral=True)
+        except Exception as e:
+            print(f"[ERROR] EditAllianceModal: {e}")
+            traceback.print_exc()
+            await interaction.response.send_message("❌ An error occurred while updating the alliance.", ephemeral=True)
+
+
+class EditGiftCodeChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog, alliance_id: int, alliance_name: str):
+        super().__init__(placeholder="Select gift code channel", min_values=1, max_values=1, channel_types=[discord.ChannelType.text])
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = self.values[0]
+        self.cog.c.execute(
+            "UPDATE alliance_list SET gift_code_channel_id = ? WHERE alliance_id = ?",
+            (channel.id, self.alliance_id)
+        )
+        self.cog.conn.commit()
+        embed = discord.Embed(
+            title="✅ Gift Code Channel Updated",
+            description=f"`{self.alliance_name}` will now pick up codes from {channel.mention}.",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+
+class EditGiftCodeChannelView(discord.ui.View):
+    def __init__(self, cog, alliance_id: int, alliance_name: str):
+        super().__init__(timeout=180)
+        self.add_item(EditGiftCodeChannelSelect(cog, alliance_id, alliance_name))
+
+
+class EditResultsChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog, alliance_id: int, alliance_name: str):
+        super().__init__(placeholder="Select results channel", min_values=1, max_values=1, channel_types=[discord.ChannelType.text])
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = self.values[0]
+        self.cog.c.execute(
+            "UPDATE alliance_list SET results_channel_id = ? WHERE alliance_id = ?",
+            (channel.id, self.alliance_id)
+        )
+        self.cog.conn.commit()
+        embed = discord.Embed(
+            title="✅ Results Channel Updated",
+            description=f"`{self.alliance_name}` will now post results to {channel.mention}.",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=embed, view=None)
+
+
+class EditResultsChannelView(discord.ui.View):
+    def __init__(self, cog, alliance_id: int, alliance_name: str):
+        super().__init__(timeout=180)
+        self.add_item(EditResultsChannelSelect(cog, alliance_id, alliance_name))
 
 
 class DeleteAllianceSelectView(discord.ui.View):
