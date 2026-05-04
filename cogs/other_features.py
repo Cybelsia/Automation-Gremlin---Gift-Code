@@ -57,18 +57,21 @@ class OtherFeatures(commands.Cog):
                 await interaction.response.send_message("❌ Only admins can run the API pull.", ephemeral=True)
                 return
 
-            with sqlite3.connect('db/alliance.sqlite') as alliance_conn:
-                alliance_cursor = alliance_conn.cursor()
-                alliance_cursor.execute(
-                    """
-                    SELECT allianceid, name
-                    FROM alliancelist
-                    WHERE discordserverid = ?
-                    ORDER BY name
-                    """,
-                    (interaction.guild_id,)
-                )
-                alliances = alliance_cursor.fetchall()
+            alliance_cog = self.bot.get_cog("Alliance")
+            if not alliance_cog:
+                await interaction.response.send_message("❌ Alliance module not found.", ephemeral=True)
+                return
+
+            alliance_cog.c.execute(
+                """
+                SELECT allianceid, name
+                FROM alliancelist
+                WHERE discordserverid = ?
+                ORDER BY name
+                """,
+                (interaction.guild_id,)
+            )
+            alliances = alliance_cog.c.fetchall()
 
             if not alliances:
                 await interaction.response.send_message("❌ No alliances found for this server.", ephemeral=True)
