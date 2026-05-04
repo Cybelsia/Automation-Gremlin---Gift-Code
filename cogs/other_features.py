@@ -57,21 +57,12 @@ class OtherFeatures(commands.Cog):
                 await interaction.response.send_message("❌ Only admins can run the API pull.", ephemeral=True)
                 return
 
-            alliance_cog = self.bot.get_cog("Alliance")
-            if not alliance_cog:
-                await interaction.response.send_message("❌ Alliance module not found.", ephemeral=True)
+            gift_cog = self.bot.get_cog("GiftOperations")
+            if not gift_cog or not hasattr(gift_cog, "get_guild_alliances"):
+                await interaction.response.send_message("❌ Gift Operations module not found.", ephemeral=True)
                 return
 
-            alliance_cog.c.execute(
-                """
-                SELECT allianceid, name
-                FROM alliancelist
-                WHERE discordserverid = ?
-                ORDER BY name
-                """,
-                (interaction.guild_id,)
-            )
-            alliances = alliance_cog.c.fetchall()
+            alliances = gift_cog.get_guild_alliances(interaction.guild_id)
 
             if not alliances:
                 await interaction.response.send_message("❌ No alliances found for this server.", ephemeral=True)
