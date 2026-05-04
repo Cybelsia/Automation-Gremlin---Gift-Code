@@ -95,9 +95,11 @@ class GiftOperations(commands.Cog):
         # Per-alliance scheduler: tracks last run time keyed by alliance_id
         self._last_run: dict[int, float] = {}
         self.alliance_scheduler.start()
+        self.weekly_member_scan.start()
 
     def cog_unload(self):
         self.alliance_scheduler.cancel()
+        self.weekly_member_scan.cancel()
 
     @tasks.loop(seconds=60)
     async def alliance_scheduler(self):
@@ -185,6 +187,132 @@ class GiftOperations(commands.Cog):
 
     @alliance_scheduler.before_loop
     async def before_alliance_scheduler(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(hours=1)
+    async def weekly_member_scan(self):
+        """Runs every hour but only executes on Sunday at 00:00 UTC."""
+        now = datetime.utcnow()
+        if not (now.weekday() == 6 and now.hour == 0):
+            return
+
+        print(f"[WEEKLY SCAN] Starting member scan at {now}")
+        try:
+            self.alliance_cursor.execute(
+                """
+                SELECT alliance_id, name, discord_server_id, results_channel_id
+                FROM alliance_list
+                WHERE results_channel_id IS NOT NULL
+                """
+            )
+            alliances = self.alliance_cursor.fetchall()
+
+            for alliance_id, alliance_name, guild_id, results_channel_id in alliances:
+                guild = self.bot.get_guild(guild_id)
+                if guild is None:
+                    print(f"[WEEKLY SCAN] Guild {guild_id} not found for alliance {alliance_id}, skipping")
+                    continue
+
+                results_channel = guild.get_channel(results_channel_id)
+                if results_channel is None:
+                    print(f"[WEEKLY SCAN] Results channel {results_channel_id} not found for alliance {alliance_id}, skipping")
+                    continue
+
+                with sqlite3.connect('db/users.sqlite') as users_conn:
+                    users_cursor = users_conn.cursor()
+                    users_cursor.execute(
+                        "SELECT fid, nickname, furnace_lv FROM users WHERE alliance = ?",
+                        (alliance_id,)
+                    )
+                    members = users_cursor.fetchall()
+
+                if not members:
+                    print(f"[WEEKLY SCAN] No members for alliance {alliance_id}, skipping")
+                    continue
+
+                name_changes = []
+                furnace_changes = []
+                errors = []
+
+                for fid, old_nickname, old_furnace_lv in members:
+                    try:
+                        time_val = int(datetime.utcnow().timestamp())
+                        form = f"fid={fid}&time={time_val}"
+                        sign = hashlib.md5((form + self.wos_encrypt_key).encode('utf-8')).hexdigest()
+                        form_data = f"fid={fid}&sign={sign}&time={time_val}"
+                        headers = {
+                            "accept": "application/json, text/plain, */*",
+                            "content-type": "application/x-www-form-urlencoded",
+                            "origin": self.wos_giftcode_redemption_url,
+                            "referer": f"{self.wos_giftcode_redemption_url}/",
+                            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        }
+                        ssl_context = ssl.create_default_context()
+                        ssl_context.check_hostname = False
+                        ssl_context.verify_mode = ssl.CERT_NONE
+
+                        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
+                            async with session.post(self.wos_player_info_url, headers=headers, data=form_data) as response:
+                                data = await response.json()
+
+                        player = data.get('data', {})
+                        new_nickname = player.get('nickname')
+                        new_furnace_lv = player.get('stove_lv')
+
+                        updated = False
+                        if new_nickname and new_nickname != old_nickname:
+                            name_changes.append((fid, old_nickname, new_nickname))
+                            updated = True
+                        if new_furnace_lv is not None and new_furnace_lv != old_furnace_lv:
+                            furnace_changes.append((fid, old_furnace_lv, new_furnace_lv))
+                            updated = True
+
+                        if updated:
+                            with sqlite3.connect('db/users.sqlite') as users_conn:
+                                users_conn.execute(
+                                    "UPDATE users SET nickname = ?, furnace_lv = ? WHERE fid = ?",
+                                    (new_nickname or old_nickname, new_furnace_lv if new_furnace_lv is not None else old_furnace_lv, fid)
+                                )
+                                users_conn.commit()
+
+                        await asyncio.sleep(1)
+
+                    except Exception as e:
+                        print(f"[WEEKLY SCAN] Error fetching fid={fid}: {e}")
+                        errors.append(fid)
+
+                # Post results
+                embed = discord.Embed(
+                    title=f"📊 Weekly Member Scan — {alliance_name}",
+                    description=f"Scan completed for `{len(members)}` members.",
+                    color=discord.Color.blue()
+                )
+
+                if name_changes:
+                    name_lines = "\n".join(f"FID `{fid}`: `{old}` → `{new}`" for fid, old, new in name_changes[:20])
+                    embed.add_field(name=f"✏️ Name Changes ({len(name_changes)})", value=name_lines, inline=False)
+                else:
+                    embed.add_field(name="✏️ Name Changes", value="None", inline=False)
+
+                if furnace_changes:
+                    furnace_lines = "\n".join(f"FID `{fid}`: Lv `{old}` → Lv `{new}`" for fid, old, new in furnace_changes[:20])
+                    embed.add_field(name=f"🔥 Furnace Changes ({len(furnace_changes)})", value=furnace_lines, inline=False)
+                else:
+                    embed.add_field(name="🔥 Furnace Changes", value="None", inline=False)
+
+                if errors:
+                    embed.add_field(name="⚠️ Errors", value=f"`{len(errors)}` members could not be fetched", inline=False)
+
+                embed.set_footer(text=f"Scan time: {now.strftime('%Y-%m-%d %H:%M UTC')}")
+                await results_channel.send(embed=embed)
+                print(f"[WEEKLY SCAN] Done for alliance {alliance_id} — {len(name_changes)} name changes, {len(furnace_changes)} furnace changes")
+
+        except Exception as e:
+            print(f"[WEEKLY SCAN] Fatal error: {e}")
+            traceback.print_exc()
+
+    @weekly_member_scan.before_loop
+    async def before_weekly_member_scan(self):
         await self.bot.wait_until_ready()
 
     async def show_gift_menu(self, interaction: discord.Interaction):
