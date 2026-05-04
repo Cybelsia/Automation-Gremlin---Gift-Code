@@ -193,8 +193,8 @@ class AllianceMemberOperations(commands.Cog):
             color=discord.Color.blue()
         )
         for fid, nickname, furnace_lv, kid, discord_id in members[:25]:
-            discord_name = "Unknown"
-            if discord_id is not None:
+            discord_name = "No Discord"
+            if discord_id:
                 try:
                     discord_user = await self.bot.fetch_user(int(discord_id))
                     discord_name = str(discord_user) if discord_user else str(discord_id)
@@ -209,7 +209,7 @@ class AllianceMemberOperations(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    async def add_alliance_member(self, interaction: discord.Interaction, alliance_id: int, fid: int, discord_id: int):
+    async def add_alliance_member(self, interaction: discord.Interaction, alliance_id: int, fid: int, discord_id: int = None):
         player_data = await self.fetch_player_info(fid)
         nickname = player_data.get('nickname')
         furnace_lv = player_data.get('stove_lv', 0)
@@ -225,8 +225,13 @@ class AllianceMemberOperations(commands.Cog):
         self.c_alliance.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
         alliance = self.c_alliance.fetchone()
         alliance_name = alliance[0] if alliance else f"Alliance {alliance_id}"
-        discord_user = await self.bot.fetch_user(int(discord_id))
-        discord_name = str(discord_user) if discord_user else str(discord_id)
+        discord_name = "No Discord account linked"
+        if discord_id:
+            try:
+                discord_user = await self.bot.fetch_user(int(discord_id))
+                discord_name = str(discord_user) if discord_user else "No Discord account linked"
+            except Exception:
+                discord_name = "No Discord account linked"
 
         embed = discord.Embed(
             title="✅ Alliance Member Added",
@@ -234,7 +239,7 @@ class AllianceMemberOperations(commands.Cog):
             color=discord.Color.green()
         )
         embed.add_field(name="FID", value=f"`{fid}`", inline=True)
-        embed.add_field(name="Discord ID", value=f"`{discord_id}`", inline=True)
+        embed.add_field(name="Discord ID", value=f"`{discord_id}`" if discord_id else "`None`", inline=True)
         embed.add_field(name="Discord", value=f"`{discord_name}`", inline=True)
         embed.add_field(name="Nickname", value=f"`{nickname}`", inline=True)
         embed.add_field(name="Furnace Level", value=f"`{stove_lv_content}`", inline=True)
@@ -309,7 +314,7 @@ class MemberOperationsView(discord.ui.View):
 
 class AddAllianceMemberModal(discord.ui.Modal, title="Add Alliance Member"):
     fid = discord.ui.TextInput(label="FID", placeholder="Enter player FID", max_length=20)
-    discord_id = discord.ui.TextInput(label="Discord ID", placeholder="Enter Discord user ID", max_length=20)
+    discord_id = discord.ui.TextInput(label="Discord ID", placeholder="Optional: Enter Discord user ID", max_length=20, required=False)
 
     def __init__(self, cog, alliance_id: int):
         super().__init__()
@@ -320,8 +325,12 @@ class AddAllianceMemberModal(discord.ui.Modal, title="Add Alliance Member"):
         fid_value = str(self.fid.value).strip()
         discord_id_value = str(self.discord_id.value).strip()
 
-        if not fid_value.isdigit() or not discord_id_value.isdigit():
-            await interaction.response.send_message("❌ FID and Discord ID must be numeric.", ephemeral=True)
+        if not fid_value.isdigit():
+            await interaction.response.send_message("❌ FID must be numeric.", ephemeral=True)
+            return
+
+        if discord_id_value and not discord_id_value.isdigit():
+            await interaction.response.send_message("❌ Discord ID must be numeric if provided.", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -331,7 +340,7 @@ class AddAllianceMemberModal(discord.ui.Modal, title="Add Alliance Member"):
                 interaction,
                 self.alliance_id,
                 int(fid_value),
-                int(discord_id_value)
+                int(discord_id_value) if discord_id_value else None
             )
         except Exception as e:
             print(f"[ERROR] Failed to add alliance member fid={fid_value} discord_id={discord_id_value}: {e}")

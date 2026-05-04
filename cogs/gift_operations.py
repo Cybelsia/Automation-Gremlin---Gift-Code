@@ -155,7 +155,9 @@ class GiftOperations(commands.Cog):
                 "📊 **Set Results Channel**\n"
                 "└ Save the channel used for auto redemption results\n\n"
                 "🛡️ **Configure Alliances**\n"
-                "└ Toggle which alliances participate in auto-redemption\n"
+                "└ Toggle which alliances participate in auto-redemption\n\n"
+                "🔍 **Scan Gift Code Channel**\n"
+                "└ Scan the last 50 messages for gift codes\n"
                 "━━━━━━━━━━━━━━━━━━━━━━"
             ),
             color=discord.Color.gold()
@@ -310,31 +312,22 @@ class GiftOperations(commands.Cog):
         enabled_ids = {row[0] for row in enabled_rows}
         return [(alliance_id, name) for alliance_id, name in alliances if alliance_id in enabled_ids]
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.author.bot or message.guild is None:
-            return
+    def get_auto_gift_results_channel(self, guild: discord.Guild, fallback_channel):
+        results_channel_id = self.get_auto_gift_results_channel_id(guild.id)
+        results_channel = guild.get_channel(results_channel_id) if results_channel_id else fallback_channel
+        if results_channel is None:
+            results_channel = fallback_channel
+        return results_channel
 
-        try:
-            configured_channel_id = self.get_auto_gift_channel_id(message.guild.id)
-            if not configured_channel_id or message.channel.id != configured_channel_id:
-                return
+    async def redeem_auto_gift_codes(self, guild_id: int, gift_codes):
+        alliances = self.get_enabled_auto_gift_alliances_for_guild(guild_id)
+        total_success = 0
+        total_failed = 0
+        processed_alliances = 0
+        processed_codes = 0
 
-            gift_code = self.extract_auto_gift_code(message.content)
-            if not gift_code:
-                return
-
-            alliances = self.get_enabled_auto_gift_alliances_for_guild(message.guild.id)
-            if not alliances:
-                results_channel_id = self.get_auto_gift_results_channel_id(message.guild.id)
-                results_channel = message.guild.get_channel(results_channel_id) if results_channel_id else message.channel
-                await results_channel.send("❌ No enabled alliances found for auto gift redemption.")
-                return
-
-            total_success = 0
-            total_failed = 0
-            processed_alliances = 0
-
+        for gift_code in gift_codes:
+            processed_codes += 1
             for alliance_id, alliance_name in alliances:
                 with sqlite3.connect('db/users.sqlite') as users_conn:
                     users_cursor = users_conn.cursor()
@@ -352,18 +345,89 @@ class GiftOperations(commands.Cog):
                         total_failed += 1
                     await asyncio.sleep(1)
 
+        return {
+            "alliances": alliances,
+            "processed_codes": processed_codes,
+            "processed_alliances": processed_alliances,
+            "total_success": total_success,
+            "total_failed": total_failed
+        }
+
+    async def scan_gift_code_channel(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
+            return
+
+        configured_channel_id = self.get_auto_gift_channel_id(interaction.guild_id)
+        if not configured_channel_id:
+            await interaction.response.send_message("❌ Gift code channel is not configured.", ephemeral=True)
+            return
+
+        gift_channel = interaction.guild.get_channel(configured_channel_id)
+        if gift_channel is None:
+            await interaction.response.send_message("❌ Configured gift code channel was not found.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        found_codes = []
+        async for message in gift_channel.history(limit=50):
+            gift_code = self.extract_auto_gift_code(message.content)
+            if gift_code and gift_code not in found_codes:
+                found_codes.append(gift_code)
+
+        results_channel = self.get_auto_gift_results_channel(interaction.guild, gift_channel)
+
+        if not found_codes:
+            embed = discord.Embed(
+                title="🔍 Gift Code Channel Scan Complete",
+                description="No gift codes found in the last 50 messages.",
+                color=discord.Color.orange()
+            )
+            await results_channel.send(embed=embed)
+            await interaction.followup.send("✅ Scan complete. No gift codes found.", ephemeral=True)
+            return
+
+        results = await self.redeem_auto_gift_codes(interaction.guild_id, found_codes)
+        embed = discord.Embed(
+            title="🔍 Gift Code Channel Scan Complete",
+            color=discord.Color.green() if results["total_failed"] == 0 else discord.Color.orange()
+        )
+        embed.add_field(name="Codes Found", value=f"`{len(found_codes)}`", inline=True)
+        embed.add_field(name="Codes Processed", value=f"`{results['processed_codes']}`", inline=True)
+        embed.add_field(name="Total Succeeded", value=f"`{results['total_success']}`", inline=True)
+        embed.add_field(name="Total Failed", value=f"`{results['total_failed']}`", inline=True)
+        await results_channel.send(embed=embed)
+        await interaction.followup.send("✅ Gift code channel scan complete.", ephemeral=True)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or message.guild is None:
+            return
+
+        try:
+            configured_channel_id = self.get_auto_gift_channel_id(message.guild.id)
+            if not configured_channel_id or message.channel.id != configured_channel_id:
+                return
+
+            gift_code = self.extract_auto_gift_code(message.content)
+            if not gift_code:
+                return
+
+            results_channel = self.get_auto_gift_results_channel(message.guild, message.channel)
+            results = await self.redeem_auto_gift_codes(message.guild.id, [gift_code])
+            if not results["alliances"]:
+                await results_channel.send("❌ No enabled alliances found for auto gift redemption.")
+                return
+
             embed = discord.Embed(
                 title="🎁 Auto Gift Code Redemption Complete",
-                color=discord.Color.green() if total_failed == 0 else discord.Color.orange()
+                color=discord.Color.green() if results["total_failed"] == 0 else discord.Color.orange()
             )
             embed.add_field(name="Gift Code Used", value=f"`{gift_code}`", inline=False)
-            embed.add_field(name="Alliances Processed", value=f"`{processed_alliances}`", inline=True)
-            embed.add_field(name="Total Succeeded", value=f"`{total_success}`", inline=True)
-            embed.add_field(name="Total Failed", value=f"`{total_failed}`", inline=True)
-            results_channel_id = self.get_auto_gift_results_channel_id(message.guild.id)
-            results_channel = message.guild.get_channel(results_channel_id) if results_channel_id else message.channel
-            if results_channel is None:
-                results_channel = message.channel
+            embed.add_field(name="Alliances Processed", value=f"`{results['processed_alliances']}`", inline=True)
+            embed.add_field(name="Total Succeeded", value=f"`{results['total_success']}`", inline=True)
+            embed.add_field(name="Total Failed", value=f"`{results['total_failed']}`", inline=True)
             await results_channel.send(embed=embed)
 
         except Exception as e:
@@ -614,6 +678,10 @@ class AutoGiftSettingsView(discord.ui.View):
             await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
             return
         await self.cog.show_auto_gift_alliance_select(interaction)
+
+    @discord.ui.button(label="Scan Gift Code Channel", emoji="🔍", style=discord.ButtonStyle.success, row=1)
+    async def scan_gift_code_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.scan_gift_code_channel(interaction)
 
 
 class AutoGiftChannelSelectView(discord.ui.View):
