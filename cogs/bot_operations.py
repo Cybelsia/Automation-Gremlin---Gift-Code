@@ -32,22 +32,22 @@ class BotOperations(commands.Cog):
                 return
 
             embed = discord.Embed(
-                title="🤖 Bot Operations",
+                title="🛡️ Admin Panel",
                 description=(
                     "Please choose an operation:\n\n"
                     "**Available Operations**\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n"
                     "👥 **Admin Management**\n"
-                    "└ Manage bot administrators\n\n"
+                    "└ Add, remove, and view administrators\n\n"
+                    "🔧 **Mod Management**\n"
+                    "└ Add and remove server moderators\n\n"
                     "🔍 **Admin Permissions**\n"
-                    "└ View and manage admin permissions\n\n"
-                    "🔄 **Bot Updates**\n"
-                    "└ Check and manage updates\n"
+                    "└ Assign alliances and manage permissions\n"
                     "━━━━━━━━━━━━━━━━━━━━━━"
                 ),
                 color=discord.Color.blue()
             )
-            
+
             view = discord.ui.View()
             view.add_item(discord.ui.Button(
                 label="Add Admin",
@@ -71,18 +71,32 @@ class BotOperations(commands.Cog):
                 row=1
             ))
             view.add_item(discord.ui.Button(
+                label="Add Mod",
+                emoji="➕",
+                style=discord.ButtonStyle.success,
+                custom_id="add_mod",
+                row=2
+            ))
+            view.add_item(discord.ui.Button(
+                label="Remove Mod",
+                emoji="➖",
+                style=discord.ButtonStyle.danger,
+                custom_id="remove_mod",
+                row=2
+            ))
+            view.add_item(discord.ui.Button(
                 label="Assign Alliance to Admin",
                 emoji="🔗",
                 style=discord.ButtonStyle.success,
                 custom_id="assign_alliance",
-                row=2
+                row=3
             ))
             view.add_item(discord.ui.Button(
                 label="Delete Admin Permissions",
                 emoji="➖",
                 style=discord.ButtonStyle.danger,
                 custom_id="view_admin_permissions",
-                row=2
+                row=3
             ))
             view.add_item(discord.ui.Button(
                 label="Main Menu",
@@ -127,10 +141,10 @@ class BotOperations(commands.Cog):
 
             doc_section = False
             update_section = False
-            
+
             for line in content:
                 line = line.strip()
-                
+
                 if line == "Documants;":
                     doc_section = True
                     continue
@@ -147,12 +161,12 @@ class BotOperations(commands.Cog):
 
             with sqlite3.connect('db/settings.sqlite') as conn:
                 cursor = conn.cursor()
-                
+
                 for file_name, new_version in documents.items():
                     cursor.execute("SELECT version FROM versions WHERE file_name = ?", (file_name,))
                     current = cursor.fetchone()
                     current_version = current[0] if current else "No Version"
-                    
+
                     if not current or current_version != new_version:
                         updates_needed.append({
                             'file': file_name,
@@ -170,6 +184,84 @@ class BotOperations(commands.Cog):
         except Exception as e:
             print(f"Error checking for updates: {e}")
             return None, None, [], []
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.type != discord.InteractionType.component:
+            return
+
+        custom_id = interaction.data.get("custom_id", "")
+
+        # ── Add Mod ───────────────────────────────────────────────
+        if custom_id == "add_mod":
+            if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+                await interaction.response.send_message("❌ Only admins can add mods.", ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title="➕ Add Mod",
+                description="Select a server member to appoint as mod:",
+                color=discord.Color.green()
+            )
+            view = discord.ui.View(timeout=60)
+            select = discord.ui.UserSelect(placeholder="Select a member", custom_id="add_mod_select")
+
+            async def add_mod_callback(select_interaction: discord.Interaction):
+                perms_cog = self.bot.get_cog("Permissions")
+                if not perms_cog:
+                    await select_interaction.response.send_message("❌ Permissions module not found.", ephemeral=True)
+                    return
+                user_id = int(list(select_interaction.data["resolved"]["users"].keys())[0])
+                member = select_interaction.guild.get_member(user_id)
+                if not member:
+                    await select_interaction.response.send_message("❌ Could not find that member in this server.", ephemeral=True)
+                    return
+                msg = await perms_cog.do_mod_add(select_interaction.guild_id, member, select_interaction.user.id)
+                await select_interaction.response.send_message(msg, ephemeral=True)
+
+            select.callback = add_mod_callback
+            view.add_item(select)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        # ── Remove Mod ────────────────────────────────────────────
+        elif custom_id == "remove_mod":
+            if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+                await interaction.response.send_message("❌ Only admins can remove mods.", ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title="➖ Remove Mod",
+                description="Select a mod to remove:",
+                color=discord.Color.red()
+            )
+            view = discord.ui.View(timeout=60)
+            select = discord.ui.UserSelect(placeholder="Select a mod to remove", custom_id="remove_mod_select")
+
+            async def remove_mod_callback(select_interaction: discord.Interaction):
+                perms_cog = self.bot.get_cog("Permissions")
+                if not perms_cog:
+                    await select_interaction.response.send_message("❌ Permissions module not found.", ephemeral=True)
+                    return
+                user_id = int(list(select_interaction.data["resolved"]["users"].keys())[0])
+                member = select_interaction.guild.get_member(user_id)
+                if not member:
+                    await select_interaction.response.send_message("❌ Could not find that member in this server.", ephemeral=True)
+                    return
+                msg = await perms_cog.do_mod_remove(select_interaction.guild_id, member)
+                await select_interaction.response.send_message(msg, ephemeral=True)
+
+            select.callback = remove_mod_callback
+            view.add_item(select)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        # ── Main Menu ─────────────────────────────────────────────
+        elif custom_id == "main_menu":
+            alliance_cog = self.bot.get_cog("Alliance")
+            if alliance_cog:
+                await alliance_cog.show_main_menu(interaction)
+            else:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ Main menu not found.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(BotOperations(bot, sqlite3.connect('db/settings.sqlite')))
