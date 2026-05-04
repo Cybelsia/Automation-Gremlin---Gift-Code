@@ -34,6 +34,14 @@ class Permissions(commands.Cog):
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_alliances (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                alliance_id INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, user_id, alliance_id)
+            )
+        """)
         self.conn.commit()
 
     def is_owner(self, user_id: int) -> bool:
