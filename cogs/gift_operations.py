@@ -119,6 +119,19 @@ class GiftOperations(commands.Cog):
             )
         return self.alliance_cursor.fetchone()
 
+    def get_gift_code_failure_reason(self, data):
+        msg = data.get("msg") if isinstance(data, dict) else None
+        if not msg:
+            return "Unknown error"
+
+        reason_mapping = {
+            "same gift code": "Already redeemed",
+            "expired": "Code expired",
+            "params error": "Request error (params)",
+            "gift code not found": "Invalid code"
+        }
+        return reason_mapping.get(msg, msg)
+
     async def show_gift_code_alliance_select(self, interaction: discord.Interaction, gift_code: str):
         if interaction.guild_id is None:
             await interaction.response.send_message("❌ This can only be used in a server.", ephemeral=True)
@@ -176,12 +189,12 @@ class GiftOperations(commands.Cog):
                 try:
                     data = json.loads(response_text)
                 except json.JSONDecodeError:
-                    return False, response_text
+                    return False, "Unknown error"
 
                 if data.get("code") == 0 or data.get("success") is True:
                     return True, response_text
 
-                return False, response_text
+                return False, self.get_gift_code_failure_reason(data)
 
     async def create_gift_code_for_alliance(self, interaction: discord.Interaction, gift_code: str, alliance_id: int, alliance_name: str):
         if interaction.guild_id is None:
@@ -218,7 +231,7 @@ class GiftOperations(commands.Cog):
         embed.add_field(name="Failed", value=f"`{len(failed)}`", inline=True)
 
         if failed:
-            failed_preview = "\n".join(f"`{fid}`: {str(reason)[:80]}" for fid, reason in failed[:10])
+            failed_preview = "\n".join(f"FID {fid}: {reason}" for fid, reason in failed[:10])
             embed.add_field(name="Failures", value=failed_preview, inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
