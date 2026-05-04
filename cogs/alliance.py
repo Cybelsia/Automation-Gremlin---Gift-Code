@@ -144,6 +144,78 @@ class Alliance(commands.Cog):
             if not interaction.response.is_done():
                 await interaction.response.send_message("❌ An error occurred while opening the alliance modal.", ephemeral=True)
 
+    async def show_delete_alliance_select(self, interaction: discord.Interaction):
+        try:
+            if interaction.guild_id is None:
+                await interaction.response.send_message("❌ This can only be used in a server.", ephemeral=True)
+                return
+
+            self.c.execute(
+                """
+                SELECT alliance_id, name
+                FROM alliance_list
+                WHERE discord_server_id = ?
+                ORDER BY name
+                """,
+                (interaction.guild_id,)
+            )
+            alliances = self.c.fetchall()
+
+            if not alliances:
+                await interaction.response.send_message("❌ No alliances found to delete.", ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title="🗑️ Delete Alliance",
+                description="Select an alliance to delete.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, view=DeleteAllianceSelectView(self, alliances), ephemeral=True)
+        except Exception as e:
+            print(f"[ERROR] Failed to show delete alliance select guild_id={interaction.guild_id}: {e}")
+            traceback.print_exc()
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ An error occurred while loading alliances.", ephemeral=True)
+
+    async def confirm_delete_alliance(self, interaction: discord.Interaction, alliance_id: int, alliance_name: str):
+        embed = discord.Embed(
+            title="⚠️ Confirm Alliance Deletion",
+            description=(
+                f"Are you sure you want to delete `{alliance_name}`?\n\n"
+                "This will also remove all members assigned to this alliance."
+            ),
+            color=discord.Color.orange()
+        )
+        await interaction.response.edit_message(embed=embed, view=ConfirmDeleteAllianceView(self, alliance_id, alliance_name))
+
+    async def delete_alliance(self, interaction: discord.Interaction, alliance_id: int, alliance_name: str):
+        try:
+            self.c.execute(
+                "DELETE FROM alliance_list WHERE alliance_id = ? AND discord_server_id = ?",
+                (alliance_id, interaction.guild_id)
+            )
+            deleted_alliances = self.c.rowcount
+            self.conn.commit()
+
+            self.c_users.execute("DELETE FROM users WHERE alliance = ?", (alliance_id,))
+            deleted_members = self.c_users.rowcount
+            self.conn_users.commit()
+
+            if deleted_alliances == 0:
+                await interaction.response.edit_message(content="❌ Alliance not found.", embed=None, view=None)
+                return
+
+            embed = discord.Embed(
+                title="✅ Alliance Deleted",
+                description=f"Deleted `{alliance_name}` and removed `{deleted_members}` member(s).",
+                color=discord.Color.green()
+            )
+            await interaction.response.edit_message(embed=embed, view=None)
+        except Exception as e:
+            print(f"[ERROR] Failed to delete alliance alliance_id={alliance_id}: {e}")
+            traceback.print_exc()
+            await interaction.response.edit_message(content="❌ An error occurred while deleting the alliance.", embed=None, view=None)
+
 
 class SettingsMenuView(discord.ui.View):
     def __init__(self, cog):
@@ -220,9 +292,57 @@ class AllianceOperationsView(discord.ui.View):
     async def view_alliances_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_alliances(interaction)
 
+    @discord.ui.button(label="Delete Alliance", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
+    async def delete_alliance_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_delete_alliance_select(interaction)
+
     @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=1)
     async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_main_menu(interaction)
+
+
+class DeleteAllianceSelectView(discord.ui.View):
+    def __init__(self, cog, alliances):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.add_item(DeleteAllianceSelect(cog, alliances))
+
+
+class DeleteAllianceSelect(discord.ui.Select):
+    def __init__(self, cog, alliances):
+        self.cog = cog
+        options = [
+            discord.SelectOption(label=name[:100], value=str(alliance_id))
+            for alliance_id, name in alliances[:25]
+        ]
+        self.alliance_names = {str(alliance_id): name for alliance_id, name in alliances[:25]}
+        super().__init__(
+            placeholder="Select an alliance to delete",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        alliance_id = int(self.values[0])
+        alliance_name = self.alliance_names.get(self.values[0], f"Alliance {alliance_id}")
+        await self.cog.confirm_delete_alliance(interaction, alliance_id, alliance_name)
+
+
+class ConfirmDeleteAllianceView(discord.ui.View):
+    def __init__(self, cog, alliance_id: int, alliance_name: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+
+    @discord.ui.button(label="Confirm Delete", emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.delete_alliance(interaction, self.alliance_id, self.alliance_name)
+
+    @discord.ui.button(label="Cancel", emoji="✖️", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Deletion cancelled.", embed=None, view=None)
 
 
 class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
