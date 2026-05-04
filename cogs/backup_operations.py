@@ -98,7 +98,7 @@ class BackupOperations(commands.Cog):
         return zip_path, alliance_data.get("name", f"Alliance {alliance_id}"), len(users_data)
 
     async def show_backup_menu(self, interaction: discord.Interaction):
-        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
             await interaction.response.send_message("❌ You don't have permission to use backup operations.", ephemeral=True)
             return
 
