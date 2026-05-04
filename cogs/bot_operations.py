@@ -9,6 +9,8 @@ from cogs.permissions import check_permission
 
 VERSION_URL = "https://raw.githubusercontent.com/Reloisback/Whiteout-Survival-Discord-Bot/refs/heads/main/autoupdateinfo.txt"
 
+BOT_OWNER_ID = 1237812594140512347
+
 class BotOperations(commands.Cog):
     def __init__(self, bot, conn):
         self.bot = bot
@@ -24,6 +26,9 @@ class BotOperations(commands.Cog):
             self.alliance_db.close()
         except:
             pass
+
+    def is_owner(self, user_id: int) -> bool:
+        return user_id == BOT_OWNER_ID
 
     async def show_bot_operations_menu(self, interaction: discord.Interaction):
         try:
@@ -192,8 +197,277 @@ class BotOperations(commands.Cog):
 
         custom_id = interaction.data.get("custom_id", "")
 
+        # ── Add Admin ─────────────────────────────────────────────
+        if custom_id == "add_admin":
+            if not self.is_owner(interaction.user.id):
+                await interaction.response.send_message("❌ Only the bot owner can add admins.", ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title="➕ Add Admin",
+                description="Select a server member to appoint as admin:",
+                color=discord.Color.green()
+            )
+            view = discord.ui.View(timeout=60)
+            select = discord.ui.UserSelect(placeholder="Select a member", custom_id="add_admin_select")
+
+            async def add_admin_callback(si: discord.Interaction):
+                perms_cog = self.bot.get_cog("Permissions")
+                if not perms_cog:
+                    await si.response.send_message("❌ Permissions module not found.", ephemeral=True)
+                    return
+                user_id = int(list(si.data["resolved"]["users"].keys())[0])
+                member = si.guild.get_member(user_id)
+                if not member:
+                    await si.response.send_message("❌ Could not find that member in this server.", ephemeral=True)
+                    return
+                msg = await perms_cog.do_admin_add(si.guild_id, member, si.user.id)
+                await si.response.send_message(msg, ephemeral=True)
+
+            select.callback = add_admin_callback
+            view.add_item(select)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        # ── Remove Admin ──────────────────────────────────────────
+        elif custom_id == "remove_admin":
+            if not self.is_owner(interaction.user.id):
+                await interaction.response.send_message("❌ Only the bot owner can remove admins.", ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title="➖ Remove Admin",
+                description="Select the admin to remove:",
+                color=discord.Color.red()
+            )
+            view = discord.ui.View(timeout=60)
+            select = discord.ui.UserSelect(placeholder="Select an admin to remove", custom_id="remove_admin_select")
+
+            async def remove_admin_callback(si: discord.Interaction):
+                perms_cog = self.bot.get_cog("Permissions")
+                if not perms_cog:
+                    await si.response.send_message("❌ Permissions module not found.", ephemeral=True)
+                    return
+                user_id = int(list(si.data["resolved"]["users"].keys())[0])
+                member = si.guild.get_member(user_id)
+                if not member:
+                    await si.response.send_message("❌ Could not find that member in this server.", ephemeral=True)
+                    return
+                msg = await perms_cog.do_admin_remove(si.guild_id, member)
+                await si.response.send_message(msg, ephemeral=True)
+
+            select.callback = remove_admin_callback
+            view.add_item(select)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        # ── View Administrators ───────────────────────────────────
+        elif custom_id == "view_administrators":
+            if not self.is_owner(interaction.user.id):
+                await interaction.response.send_message("❌ Only the bot owner can view administrators.", ephemeral=True)
+                return
+
+            self.settings_cursor.execute(
+                "SELECT user_id, appointed_by, created_at FROM permissions WHERE guild_id = ? AND role = 'admin'",
+                (interaction.guild_id,)
+            )
+            rows = self.settings_cursor.fetchall()
+
+            embed = discord.Embed(title="👥 Server Administrators", color=discord.Color.blue())
+
+            if not rows:
+                embed.description = "No admins assigned for this server."
+            else:
+                for user_id, appointed_by, created_at in rows:
+                    # Get assigned alliances
+                    self.settings_cursor.execute(
+                        "SELECT alliance_id FROM admin_alliances WHERE guild_id = ? AND user_id = ?",
+                        (interaction.guild_id, user_id)
+                    )
+                    alliance_rows = self.settings_cursor.fetchall()
+                    if alliance_rows:
+                        alliance_ids = [str(r[0]) for r in alliance_rows]
+                        # Look up names
+                        names = []
+                        for aid in alliance_ids:
+                            self.c_alliance.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (aid,))
+                            result = self.c_alliance.fetchone()
+                            names.append(result[0] if result else f"ID {aid}")
+                        alliance_str = ", ".join(names)
+                    else:
+                        alliance_str = "None assigned"
+
+                    embed.add_field(
+                        name=f"<@{user_id}> (`{user_id}`)",
+                        value=(
+                            f"Appointed by: <@{appointed_by}>\n"
+                            f"Date: `{created_at}`\n"
+                            f"Alliances: {alliance_str}"
+                        ),
+                        inline=False
+                    )
+
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # ── Assign Alliance to Admin ───────────────────────────────
+        elif custom_id == "assign_alliance":
+            if not self.is_owner(interaction.user.id):
+                await interaction.response.send_message("❌ Only the bot owner can assign alliances.", ephemeral=True)
+                return
+
+            # Step 1: pick the admin
+            self.settings_cursor.execute(
+                "SELECT user_id FROM permissions WHERE guild_id = ? AND role = 'admin'",
+                (interaction.guild_id,)
+            )
+            admin_rows = self.settings_cursor.fetchall()
+            if not admin_rows:
+                await interaction.response.send_message("❌ No admins found for this server.", ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title="🔗 Assign Alliance to Admin",
+                description="Step 1: Select the admin to assign an alliance to:",
+                color=discord.Color.green()
+            )
+            view = discord.ui.View(timeout=120)
+            admin_select = discord.ui.UserSelect(placeholder="Select an admin", custom_id="assign_admin_select")
+
+            async def admin_selected(si: discord.Interaction):
+                selected_admin_id = int(list(si.data["resolved"]["users"].keys())[0])
+
+                # Verify they are actually an admin
+                self.settings_cursor.execute(
+                    "SELECT role FROM permissions WHERE guild_id = ? AND user_id = ?",
+                    (si.guild_id, selected_admin_id)
+                )
+                result = self.settings_cursor.fetchone()
+                if not result or result[0] != "admin":
+                    await si.response.send_message("❌ That user is not an admin on this server.", ephemeral=True)
+                    return
+
+                # Step 2: pick the alliance
+                self.c_alliance.execute(
+                    "SELECT alliance_id, name FROM alliance_list WHERE discord_server_id = ? ORDER BY name",
+                    (si.guild_id,)
+                )
+                alliances = self.c_alliance.fetchall()
+                if not alliances:
+                    await si.response.send_message("❌ No alliances found for this server.", ephemeral=True)
+                    return
+
+                options = [
+                    discord.SelectOption(label=name, value=str(aid))
+                    for aid, name in alliances
+                ]
+                alliance_embed = discord.Embed(
+                    title="🔗 Assign Alliance to Admin",
+                    description=f"Step 2: Select the alliance to assign to <@{selected_admin_id}>:",
+                    color=discord.Color.green()
+                )
+                alliance_view = discord.ui.View(timeout=120)
+                alliance_select = discord.ui.Select(
+                    placeholder="Select an alliance",
+                    options=options,
+                    custom_id="assign_alliance_select"
+                )
+
+                async def alliance_selected(si2: discord.Interaction):
+                    alliance_id = int(si2.data["values"][0])
+                    try:
+                        self.settings_cursor.execute(
+                            """
+                            INSERT OR IGNORE INTO admin_alliances (guild_id, user_id, alliance_id)
+                            VALUES (?, ?, ?)
+                            """,
+                            (si2.guild_id, selected_admin_id, alliance_id)
+                        )
+                        self.settings_db.commit()
+                        self.c_alliance.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
+                        aname = self.c_alliance.fetchone()
+                        aname = aname[0] if aname else str(alliance_id)
+                        await si2.response.send_message(
+                            f"✅ Alliance **{aname}** assigned to <@{selected_admin_id}>.",
+                            ephemeral=True
+                        )
+                    except Exception as e:
+                        print(f"Error assigning alliance: {e}")
+                        await si2.response.send_message("❌ An error occurred while assigning the alliance.", ephemeral=True)
+
+                alliance_select.callback = alliance_selected
+                alliance_view.add_item(alliance_select)
+                await si.response.send_message(embed=alliance_embed, view=alliance_view, ephemeral=True)
+
+            admin_select.callback = admin_selected
+            view.add_item(admin_select)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        # ── Delete Admin Permissions (sever alliance link) ─────────
+        elif custom_id == "view_admin_permissions":
+            if not self.is_owner(interaction.user.id):
+                await interaction.response.send_message("❌ Only the bot owner can remove alliance assignments.", ephemeral=True)
+                return
+
+            self.settings_cursor.execute(
+                """
+                SELECT aa.user_id, aa.alliance_id
+                FROM admin_alliances aa
+                WHERE aa.guild_id = ?
+                """,
+                (interaction.guild_id,)
+            )
+            rows = self.settings_cursor.fetchall()
+            if not rows:
+                await interaction.response.send_message("❌ No alliance assignments found for this server.", ephemeral=True)
+                return
+
+            # Build select options: one per admin-alliance pair
+            options = []
+            for user_id, alliance_id in rows:
+                self.c_alliance.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
+                aresult = self.c_alliance.fetchone()
+                aname = aresult[0] if aresult else str(alliance_id)
+                options.append(
+                    discord.SelectOption(
+                        label=f"<ID {user_id}> → {aname}",
+                        description=f"User {user_id} | Alliance {aname}",
+                        value=f"{user_id}:{alliance_id}"
+                    )
+                )
+
+            embed = discord.Embed(
+                title="➖ Delete Admin Permissions",
+                description="Select an admin–alliance link to remove:",
+                color=discord.Color.red()
+            )
+            view = discord.ui.View(timeout=60)
+            select = discord.ui.Select(
+                placeholder="Select a link to remove",
+                options=options,
+                custom_id="delete_admin_perm_select"
+            )
+
+            async def delete_perm_callback(si: discord.Interaction):
+                value = si.data["values"][0]
+                user_id, alliance_id = value.split(":")
+                user_id, alliance_id = int(user_id), int(alliance_id)
+                self.settings_cursor.execute(
+                    "DELETE FROM admin_alliances WHERE guild_id = ? AND user_id = ? AND alliance_id = ?",
+                    (si.guild_id, user_id, alliance_id)
+                )
+                self.settings_db.commit()
+                self.c_alliance.execute("SELECT name FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
+                aresult = self.c_alliance.fetchone()
+                aname = aresult[0] if aresult else str(alliance_id)
+                await si.response.send_message(
+                    f"✅ Removed alliance **{aname}** from <@{user_id}>.",
+                    ephemeral=True
+                )
+
+            select.callback = delete_perm_callback
+            view.add_item(select)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
         # ── Add Mod ───────────────────────────────────────────────
-        if custom_id == "add_mod":
+        elif custom_id == "add_mod":
             if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
                 await interaction.response.send_message("❌ Only admins can add mods.", ephemeral=True)
                 return
@@ -206,18 +480,18 @@ class BotOperations(commands.Cog):
             view = discord.ui.View(timeout=60)
             select = discord.ui.UserSelect(placeholder="Select a member", custom_id="add_mod_select")
 
-            async def add_mod_callback(select_interaction: discord.Interaction):
+            async def add_mod_callback(si: discord.Interaction):
                 perms_cog = self.bot.get_cog("Permissions")
                 if not perms_cog:
-                    await select_interaction.response.send_message("❌ Permissions module not found.", ephemeral=True)
+                    await si.response.send_message("❌ Permissions module not found.", ephemeral=True)
                     return
-                user_id = int(list(select_interaction.data["resolved"]["users"].keys())[0])
-                member = select_interaction.guild.get_member(user_id)
+                user_id = int(list(si.data["resolved"]["users"].keys())[0])
+                member = si.guild.get_member(user_id)
                 if not member:
-                    await select_interaction.response.send_message("❌ Could not find that member in this server.", ephemeral=True)
+                    await si.response.send_message("❌ Could not find that member in this server.", ephemeral=True)
                     return
-                msg = await perms_cog.do_mod_add(select_interaction.guild_id, member, select_interaction.user.id)
-                await select_interaction.response.send_message(msg, ephemeral=True)
+                msg = await perms_cog.do_mod_add(si.guild_id, member, si.user.id)
+                await si.response.send_message(msg, ephemeral=True)
 
             select.callback = add_mod_callback
             view.add_item(select)
@@ -237,18 +511,18 @@ class BotOperations(commands.Cog):
             view = discord.ui.View(timeout=60)
             select = discord.ui.UserSelect(placeholder="Select a mod to remove", custom_id="remove_mod_select")
 
-            async def remove_mod_callback(select_interaction: discord.Interaction):
+            async def remove_mod_callback(si: discord.Interaction):
                 perms_cog = self.bot.get_cog("Permissions")
                 if not perms_cog:
-                    await select_interaction.response.send_message("❌ Permissions module not found.", ephemeral=True)
+                    await si.response.send_message("❌ Permissions module not found.", ephemeral=True)
                     return
-                user_id = int(list(select_interaction.data["resolved"]["users"].keys())[0])
-                member = select_interaction.guild.get_member(user_id)
+                user_id = int(list(si.data["resolved"]["users"].keys())[0])
+                member = si.guild.get_member(user_id)
                 if not member:
-                    await select_interaction.response.send_message("❌ Could not find that member in this server.", ephemeral=True)
+                    await si.response.send_message("❌ Could not find that member in this server.", ephemeral=True)
                     return
-                msg = await perms_cog.do_mod_remove(select_interaction.guild_id, member)
-                await select_interaction.response.send_message(msg, ephemeral=True)
+                msg = await perms_cog.do_mod_remove(si.guild_id, member)
+                await si.response.send_message(msg, ephemeral=True)
 
             select.callback = remove_mod_callback
             view.add_item(select)
