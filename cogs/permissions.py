@@ -63,27 +63,19 @@ class Permissions(commands.Cog):
         await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return False
 
-    @admin.command(name="add", description="Appoint this server's administrator")
-    @app_commands.describe(user="User to appoint as this server's admin")
-    async def admin_add(self, interaction: discord.Interaction, user: discord.Member):
-        if not await self._require_permission(interaction, "owner"):
-            return
-        if interaction.guild_id is None:
-            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
-            return
+    async def do_admin_add(self, guild_id: int, user: discord.Member, appointed_by_id: int) -> str:
+        """Core logic for adding an admin. Returns a result message string."""
         if user.bot:
-            await interaction.response.send_message("❌ Bots cannot be appointed as admins.", ephemeral=True)
-            return
-
+            return "❌ Bots cannot be appointed as admins."
+        if self.is_owner(user.id):
+            return "❌ The bot owner cannot be assigned a role."
         self.cursor.execute(
             "SELECT user_id FROM permissions WHERE guild_id = ? AND role = 'admin'",
-            (interaction.guild_id,)
+            (guild_id,)
         )
         existing_admin = self.cursor.fetchone()
         if existing_admin and existing_admin[0] != user.id:
-            await interaction.response.send_message("❌ This server already has an admin. Remove them before appointing a new one.", ephemeral=True)
-            return
-
+            return "❌ This server already has an admin. Remove them before appointing a new one."
         self.cursor.execute(
             """
             INSERT INTO permissions (guild_id, user_id, role, appointed_by)
@@ -93,10 +85,70 @@ class Permissions(commands.Cog):
                 appointed_by = excluded.appointed_by,
                 created_at = CURRENT_TIMESTAMP
             """,
-            (interaction.guild_id, user.id, interaction.user.id)
+            (guild_id, user.id, appointed_by_id)
         )
         self.conn.commit()
-        await interaction.response.send_message(f"✅ {user.mention} is now this server's admin.", ephemeral=True)
+        return f"✅ {user.mention} is now this server's admin."
+
+    async def do_admin_remove(self, guild_id: int, user: discord.Member) -> str:
+        """Core logic for removing an admin. Returns a result message string."""
+        self.cursor.execute(
+            "DELETE FROM permissions WHERE guild_id = ? AND user_id = ? AND role = 'admin'",
+            (guild_id, user.id)
+        )
+        self.conn.commit()
+        if self.cursor.rowcount == 0:
+            return "❌ That user is not this server's admin."
+        return f"✅ Removed {user.mention} as this server's admin."
+
+    async def do_mod_add(self, guild_id: int, user: discord.Member, appointed_by_id: int) -> str:
+        """Core logic for adding a mod. Returns a result message string."""
+        if user.bot:
+            return "❌ Bots cannot be appointed as mods."
+        if self.is_owner(user.id):
+            return "❌ The bot owner cannot be changed to a mod."
+        self.cursor.execute(
+            "SELECT role FROM permissions WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user.id)
+        )
+        existing = self.cursor.fetchone()
+        if existing and existing[0] == "admin":
+            return "❌ This user is already this server's admin."
+        self.cursor.execute(
+            """
+            INSERT INTO permissions (guild_id, user_id, role, appointed_by)
+            VALUES (?, ?, 'mod', ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                role = excluded.role,
+                appointed_by = excluded.appointed_by,
+                created_at = CURRENT_TIMESTAMP
+            """,
+            (guild_id, user.id, appointed_by_id)
+        )
+        self.conn.commit()
+        return f"✅ {user.mention} is now a server mod."
+
+    async def do_mod_remove(self, guild_id: int, user: discord.Member) -> str:
+        """Core logic for removing a mod. Returns a result message string."""
+        self.cursor.execute(
+            "DELETE FROM permissions WHERE guild_id = ? AND user_id = ? AND role = 'mod'",
+            (guild_id, user.id)
+        )
+        self.conn.commit()
+        if self.cursor.rowcount == 0:
+            return "❌ That user is not a server mod."
+        return f"✅ Removed {user.mention} as server mod."
+
+    @admin.command(name="add", description="Appoint this server's administrator")
+    @app_commands.describe(user="User to appoint as this server's admin")
+    async def admin_add(self, interaction: discord.Interaction, user: discord.Member):
+        if not await self._require_permission(interaction, "owner"):
+            return
+        if interaction.guild_id is None:
+            await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
+            return
+        msg = await self.do_admin_add(interaction.guild_id, user, interaction.user.id)
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @admin.command(name="list", description="List this server's administrators")
     async def admin_list(self, interaction: discord.Interaction):
@@ -130,16 +182,8 @@ class Permissions(commands.Cog):
         if interaction.guild_id is None:
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
-
-        self.cursor.execute(
-            "DELETE FROM permissions WHERE guild_id = ? AND user_id = ? AND role = 'admin'",
-            (interaction.guild_id, user.id)
-        )
-        self.conn.commit()
-        if self.cursor.rowcount == 0:
-            await interaction.response.send_message("❌ That user is not this server's admin.", ephemeral=True)
-            return
-        await interaction.response.send_message(f"✅ Removed {user.mention} as this server's admin.", ephemeral=True)
+        msg = await self.do_admin_remove(interaction.guild_id, user)
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @mod.command(name="add", description="Appoint a server moderator")
     @app_commands.describe(user="User to appoint as moderator")
@@ -149,35 +193,8 @@ class Permissions(commands.Cog):
         if interaction.guild_id is None:
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
-        if user.bot:
-            await interaction.response.send_message("❌ Bots cannot be appointed as mods.", ephemeral=True)
-            return
-        if self.is_owner(user.id):
-            await interaction.response.send_message("❌ The bot owner cannot be changed to a mod.", ephemeral=True)
-            return
-
-        self.cursor.execute(
-            "SELECT role FROM permissions WHERE guild_id = ? AND user_id = ?",
-            (interaction.guild_id, user.id)
-        )
-        existing = self.cursor.fetchone()
-        if existing and existing[0] == "admin":
-            await interaction.response.send_message("❌ This user is already this server's admin.", ephemeral=True)
-            return
-
-        self.cursor.execute(
-            """
-            INSERT INTO permissions (guild_id, user_id, role, appointed_by)
-            VALUES (?, ?, 'mod', ?)
-            ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                role = excluded.role,
-                appointed_by = excluded.appointed_by,
-                created_at = CURRENT_TIMESTAMP
-            """,
-            (interaction.guild_id, user.id, interaction.user.id)
-        )
-        self.conn.commit()
-        await interaction.response.send_message(f"✅ {user.mention} is now a server mod.", ephemeral=True)
+        msg = await self.do_mod_add(interaction.guild_id, user, interaction.user.id)
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @mod.command(name="list", description="List this server's moderators")
     async def mod_list(self, interaction: discord.Interaction):
@@ -211,16 +228,8 @@ class Permissions(commands.Cog):
         if interaction.guild_id is None:
             await interaction.response.send_message("❌ This command can only be used in a server.", ephemeral=True)
             return
-
-        self.cursor.execute(
-            "DELETE FROM permissions WHERE guild_id = ? AND user_id = ? AND role = 'mod'",
-            (interaction.guild_id, user.id)
-        )
-        self.conn.commit()
-        if self.cursor.rowcount == 0:
-            await interaction.response.send_message("❌ That user is not a server mod.", ephemeral=True)
-            return
-        await interaction.response.send_message(f"✅ Removed {user.mention} as a server mod.", ephemeral=True)
+        msg = await self.do_mod_remove(interaction.guild_id, user)
+        await interaction.response.send_message(msg, ephemeral=True)
 
     def cog_unload(self):
         self.conn.close()
