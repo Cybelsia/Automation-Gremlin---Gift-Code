@@ -44,6 +44,23 @@ class GiftOperations(commands.Cog):
         
         self.alliance_conn = sqlite3.connect('db/alliance.sqlite')
         self.alliance_cursor = self.alliance_conn.cursor()
+
+        self.gift_operations_conn = sqlite3.connect('db/gift_operations.sqlite')
+        self.gift_operations_cursor = self.gift_operations_conn.cursor()
+        self.gift_operations_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS auto_gift_settings (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER
+            )
+        """)
+        self.gift_operations_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS auto_gift_alliances (
+                guild_id INTEGER,
+                alliance_id INTEGER,
+                PRIMARY KEY (guild_id, alliance_id)
+            )
+        """)
+        self.gift_operations_conn.commit()
         
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS giftcode_channel (
@@ -97,6 +114,214 @@ class GiftOperations(commands.Cog):
             return
 
         await interaction.response.send_modal(CreateGiftCodeModal(self))
+
+    async def show_auto_gift_settings(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
+            return
+
+        self.gift_operations_cursor.execute(
+            "SELECT channel_id FROM auto_gift_settings WHERE guild_id = ?",
+            (interaction.guild_id,)
+        )
+        channel_row = self.gift_operations_cursor.fetchone()
+        channel_text = f"<#{channel_row[0]}>" if channel_row and channel_row[0] else "`Not set`"
+
+        self.alliance_cursor.execute(
+            """
+            SELECT alliance_id, name
+            FROM alliance_list
+            WHERE discord_server_id = ?
+            ORDER BY name
+            """,
+            (interaction.guild_id,)
+        )
+        alliances = self.alliance_cursor.fetchall()
+        enabled_alliances = self.get_auto_gift_enabled_alliances(interaction.guild_id, alliances)
+
+        embed = discord.Embed(
+            title="⚙️ Auto Gift Code Settings",
+            description=(
+                "**Available Options**\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "📢 **Set Gift Code Channel**\n"
+                "└ Save the channel used for auto gift code messages\n\n"
+                "🛡️ **Configure Alliances**\n"
+                "└ Toggle which alliances participate in auto-redemption\n"
+                "━━━━━━━━━━━━━━━━━━━━━━"
+            ),
+            color=discord.Color.gold()
+        )
+        embed.add_field(name="Gift Code Channel", value=channel_text, inline=False)
+        embed.add_field(name="Enabled Alliances", value=f"`{len(enabled_alliances)}` / `{len(alliances)}`", inline=False)
+        await interaction.response.send_message(embed=embed, view=AutoGiftSettingsView(self), ephemeral=True)
+
+    def get_auto_gift_enabled_alliances(self, guild_id: int, alliances):
+        all_alliance_ids = [alliance_id for alliance_id, _ in alliances]
+        self.gift_operations_cursor.execute(
+            "SELECT alliance_id FROM auto_gift_alliances WHERE guild_id = ?",
+            (guild_id,)
+        )
+        rows = self.gift_operations_cursor.fetchall()
+        if not rows:
+            return all_alliance_ids
+        return [row[0] for row in rows]
+
+    async def save_auto_gift_channel(self, interaction: discord.Interaction, channel_id: int):
+        self.gift_operations_cursor.execute(
+            """
+            INSERT OR REPLACE INTO auto_gift_settings (guild_id, channel_id)
+            VALUES (?, ?)
+            """,
+            (interaction.guild_id, channel_id)
+        )
+        self.gift_operations_conn.commit()
+        await interaction.response.send_message(f"✅ Auto gift code channel set to <#{channel_id}>.", ephemeral=True)
+
+    async def show_auto_gift_alliance_select(self, interaction: discord.Interaction):
+        self.alliance_cursor.execute(
+            """
+            SELECT alliance_id, name
+            FROM alliance_list
+            WHERE discord_server_id = ?
+            ORDER BY name
+            """,
+            (interaction.guild_id,)
+        )
+        alliances = self.alliance_cursor.fetchall()
+
+        if not alliances:
+            await interaction.response.send_message("❌ No alliances found for this server.", ephemeral=True)
+            return
+
+        enabled_alliances = self.get_auto_gift_enabled_alliances(interaction.guild_id, alliances)
+        embed = discord.Embed(
+            title="🛡️ Configure Auto Gift Alliances",
+            description="Select the alliances that should participate in auto-redemption.",
+            color=discord.Color.gold()
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=AutoGiftAllianceSelectView(self, alliances, enabled_alliances),
+            ephemeral=True
+        )
+
+    async def save_auto_gift_alliances(self, interaction: discord.Interaction, alliance_ids):
+        self.gift_operations_cursor.execute(
+            "DELETE FROM auto_gift_alliances WHERE guild_id = ?",
+            (interaction.guild_id,)
+        )
+        self.gift_operations_cursor.executemany(
+            """
+            INSERT OR IGNORE INTO auto_gift_alliances (guild_id, alliance_id)
+            VALUES (?, ?)
+            """,
+            [(interaction.guild_id, alliance_id) for alliance_id in alliance_ids]
+        )
+        self.gift_operations_conn.commit()
+        await interaction.response.send_message(f"✅ Auto gift alliances updated. Enabled: `{len(alliance_ids)}`.", ephemeral=True)
+
+    def extract_auto_gift_code(self, content: str):
+        content = content.strip()
+        if not content:
+            return None
+
+        code_match = re.search(r"Code:\s*(\S+)", content, re.IGNORECASE)
+        if code_match:
+            return code_match.group(1).strip()
+
+        if re.fullmatch(r"[A-Za-z0-9]+", content):
+            return content
+
+        return None
+
+    def get_auto_gift_channel_id(self, guild_id: int):
+        self.gift_operations_cursor.execute(
+            "SELECT channel_id FROM auto_gift_settings WHERE guild_id = ?",
+            (guild_id,)
+        )
+        row = self.gift_operations_cursor.fetchone()
+        return row[0] if row else None
+
+    def get_guild_alliances(self, guild_id: int):
+        self.alliance_cursor.execute(
+            """
+            SELECT alliance_id, name
+            FROM alliance_list
+            WHERE discord_server_id = ?
+            ORDER BY name
+            """,
+            (guild_id,)
+        )
+        return self.alliance_cursor.fetchall()
+
+    def get_enabled_auto_gift_alliances_for_guild(self, guild_id: int):
+        alliances = self.get_guild_alliances(guild_id)
+        self.gift_operations_cursor.execute(
+            "SELECT alliance_id FROM auto_gift_alliances WHERE guild_id = ?",
+            (guild_id,)
+        )
+        enabled_rows = self.gift_operations_cursor.fetchall()
+
+        if not enabled_rows:
+            return alliances
+
+        enabled_ids = {row[0] for row in enabled_rows}
+        return [(alliance_id, name) for alliance_id, name in alliances if alliance_id in enabled_ids]
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or message.guild is None:
+            return
+
+        try:
+            configured_channel_id = self.get_auto_gift_channel_id(message.guild.id)
+            if not configured_channel_id or message.channel.id != configured_channel_id:
+                return
+
+            gift_code = self.extract_auto_gift_code(message.content)
+            if not gift_code:
+                return
+
+            alliances = self.get_enabled_auto_gift_alliances_for_guild(message.guild.id)
+            if not alliances:
+                await message.channel.send("❌ No enabled alliances found for auto gift redemption.")
+                return
+
+            total_success = 0
+            total_failed = 0
+            processed_alliances = 0
+
+            for alliance_id, alliance_name in alliances:
+                with sqlite3.connect('db/users.sqlite') as users_conn:
+                    users_cursor = users_conn.cursor()
+                    users_cursor.execute("SELECT fid FROM users WHERE alliance = ?", (alliance_id,))
+                    members = users_cursor.fetchall()
+
+                if members:
+                    processed_alliances += 1
+
+                for (fid,) in members:
+                    ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
+                    if ok:
+                        total_success += 1
+                    else:
+                        total_failed += 1
+                    await asyncio.sleep(1)
+
+            embed = discord.Embed(
+                title="🎁 Auto Gift Code Redemption Complete",
+                color=discord.Color.green() if total_failed == 0 else discord.Color.orange()
+            )
+            embed.add_field(name="Gift Code Used", value=f"`{gift_code}`", inline=False)
+            embed.add_field(name="Alliances Processed", value=f"`{processed_alliances}`", inline=True)
+            embed.add_field(name="Total Succeeded", value=f"`{total_success}`", inline=True)
+            embed.add_field(name="Total Failed", value=f"`{total_failed}`", inline=True)
+            await message.channel.send(embed=embed)
+
+        except Exception as e:
+            print(f"[ERROR] Auto gift code redemption failed: {e}")
+            traceback.print_exc()
 
     async def get_alliance_by_input(self, alliance_value: str, guild_id: int):
         if alliance_value.isdigit():
@@ -266,7 +491,7 @@ class GiftMenuView(discord.ui.View):
 
     @discord.ui.button(label="Auto Gift Settings", emoji="⚙️", style=discord.ButtonStyle.primary, row=1)
     async def auto_gift_settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._not_configured(interaction, "Auto Gift Settings")
+        await self.cog.show_auto_gift_settings(interaction)
 
     @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=2)
     async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -305,6 +530,86 @@ class GiftCodeAllianceSelect(discord.ui.Select):
         alliance_name = self.alliance_names.get(self.values[0], f"Alliance {alliance_id}")
         await interaction.response.defer(ephemeral=True, thinking=True)
         await self.cog.create_gift_code_for_alliance(interaction, self.gift_code, alliance_id, alliance_name)
+
+
+class AutoGiftSettingsView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    @discord.ui.button(label="Set Gift Code Channel", emoji="📢", style=discord.ButtonStyle.primary, row=0)
+    async def set_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
+            return
+        await interaction.response.send_modal(AutoGiftChannelModal(self.cog))
+
+    @discord.ui.button(label="Configure Alliances", emoji="🛡️", style=discord.ButtonStyle.secondary, row=0)
+    async def configure_alliances_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
+            return
+        await self.cog.show_auto_gift_alliance_select(interaction)
+
+
+class AutoGiftChannelModal(discord.ui.Modal, title="Set Gift Code Channel"):
+    channel_id = discord.ui.TextInput(
+        label="Channel ID",
+        placeholder="Enter channel ID",
+        max_length=25
+    )
+
+    def __init__(self, cog):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        channel_id_value = str(self.channel_id.value).strip()
+        if not channel_id_value.isdigit():
+            await interaction.response.send_message("❌ Channel ID must be a number.", ephemeral=True)
+            return
+
+        channel_id = int(channel_id_value)
+        channel = interaction.guild.get_channel(channel_id) if interaction.guild else None
+        if channel is None:
+            await interaction.response.send_message("❌ Channel not found in this server.", ephemeral=True)
+            return
+
+        await self.cog.save_auto_gift_channel(interaction, channel_id)
+
+
+class AutoGiftAllianceSelectView(discord.ui.View):
+    def __init__(self, cog, alliances, enabled_alliances):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.add_item(AutoGiftAllianceSelect(cog, alliances, enabled_alliances))
+
+
+class AutoGiftAllianceSelect(discord.ui.Select):
+    def __init__(self, cog, alliances, enabled_alliances):
+        self.cog = cog
+        options = [
+            discord.SelectOption(
+                label=name[:100],
+                value=str(alliance_id),
+                default=alliance_id in enabled_alliances
+            )
+            for alliance_id, name in alliances[:25]
+        ]
+        super().__init__(
+            placeholder="Select enabled auto gift alliances",
+            min_values=0,
+            max_values=len(options),
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
+            return
+
+        alliance_ids = [int(value) for value in self.values]
+        await self.cog.save_auto_gift_alliances(interaction, alliance_ids)
 
 
 class CreateGiftCodeModal(discord.ui.Modal, title="Create Gift Code"):
