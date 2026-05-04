@@ -45,6 +45,12 @@ class Alliance(commands.Cog):
         if "refresh_rate" not in columns:
             self.c.execute("ALTER TABLE alliance_list ADD COLUMN refresh_rate INTEGER")
             self.conn.commit()
+        if "gift_code_channel_id" not in columns:
+            self.c.execute("ALTER TABLE alliance_list ADD COLUMN gift_code_channel_id INTEGER")
+            self.conn.commit()
+        if "results_channel_id" not in columns:
+            self.c.execute("ALTER TABLE alliance_list ADD COLUMN results_channel_id INTEGER")
+            self.conn.commit()
 
     @app_commands.command(name="settings", description="Open settings menu.")
     async def settings(self, interaction: discord.Interaction):
@@ -387,25 +393,19 @@ class AddAllianceModal(discord.ui.Modal, title="Add New Alliance"):
                 (name, interaction.guild_id, int(refresh_rate_value))
             )
             self.cog.conn.commit()
-            print(f"[DEBUG] Added alliance guild_id={interaction.guild_id} name={name}")
-            self.cog.c.execute(
-                """
-                SELECT alliance_id, name, discord_server_id, refresh_rate
-                FROM alliance_list
-                WHERE name = ? AND discord_server_id = ?
-                """,
-                (name, interaction.guild_id)
-            )
-            saved_row = self.cog.c.fetchone()
-            print(f"[DEBUG] Confirm saved alliance row={saved_row}")
+            alliance_id = self.cog.c.lastrowid
+            print(f"[DEBUG] Added alliance guild_id={interaction.guild_id} name={name} alliance_id={alliance_id}")
             embed = discord.Embed(
-                title="✅ Alliance Added",
-                description=f"Successfully added alliance `{name}`.",
-                color=discord.Color.green()
+                title="✅ Alliance Added — Step 2 of 3",
+                description=f"Alliance `{name}` created. Now select the **gift code channel** where codes will be picked up.",
+                color=discord.Color.gold()
             )
-            embed.add_field(name="Discord Server ID", value=f"`{interaction.guild_id}`", inline=False)
             embed.add_field(name="Refresh Rate", value=f"`{refresh_rate_value}` seconds", inline=False)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(
+                embed=embed,
+                view=AllianceGiftCodeChannelSetupView(self.cog, alliance_id, name, int(refresh_rate_value)),
+                ephemeral=True
+            )
         except sqlite3.IntegrityError as e:
             print(f"[ERROR] Alliance INSERT integrity error guild_id={interaction.guild_id} name={name}: {e}")
             traceback.print_exc()
@@ -426,6 +426,84 @@ class PaginatedChannelView(discord.ui.View):
         super().__init__(timeout=300)
         self.channels = channels
         self.original_callback = original_callback
+
+
+class AllianceGiftCodeChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog, alliance_id: int, alliance_name: str, refresh_rate: int):
+        super().__init__(
+            placeholder="Select gift code channel",
+            min_values=1,
+            max_values=1,
+            channel_types=[discord.ChannelType.text]
+        )
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+        self.refresh_rate = refresh_rate
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = self.values[0]
+        self.cog.c.execute(
+            "UPDATE alliance_list SET gift_code_channel_id = ? WHERE alliance_id = ?",
+            (channel.id, self.alliance_id)
+        )
+        self.cog.conn.commit()
+        print(f"[DEBUG] Set gift_code_channel_id={channel.id} for alliance_id={self.alliance_id}")
+        embed = discord.Embed(
+            title="✅ Gift Code Channel Set — Step 3 of 3",
+            description=f"Gift code channel set to {channel.mention}. Now select the **results channel** where redemption results will be posted.",
+            color=discord.Color.gold()
+        )
+        await interaction.response.edit_message(
+            embed=embed,
+            view=AllianceResultsChannelSetupView(self.cog, self.alliance_id, self.alliance_name, self.refresh_rate, channel.id)
+        )
+
+
+class AllianceGiftCodeChannelSetupView(discord.ui.View):
+    def __init__(self, cog, alliance_id: int, alliance_name: str, refresh_rate: int):
+        super().__init__(timeout=300)
+        self.add_item(AllianceGiftCodeChannelSelect(cog, alliance_id, alliance_name, refresh_rate))
+
+
+class AllianceResultsChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog, alliance_id: int, alliance_name: str, refresh_rate: int, gift_code_channel_id: int):
+        super().__init__(
+            placeholder="Select results channel",
+            min_values=1,
+            max_values=1,
+            channel_types=[discord.ChannelType.text]
+        )
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+        self.refresh_rate = refresh_rate
+        self.gift_code_channel_id = gift_code_channel_id
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = self.values[0]
+        self.cog.c.execute(
+            "UPDATE alliance_list SET results_channel_id = ? WHERE alliance_id = ?",
+            (channel.id, self.alliance_id)
+        )
+        self.cog.conn.commit()
+        print(f"[DEBUG] Set results_channel_id={channel.id} for alliance_id={self.alliance_id}")
+        embed = discord.Embed(
+            title="✅ Alliance Setup Complete",
+            description=f"Alliance `{self.alliance_name}` is fully configured.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Refresh Rate", value=f"`{self.refresh_rate}` seconds", inline=False)
+        embed.add_field(name="Gift Code Channel", value=f"<#{self.gift_code_channel_id}>", inline=False)
+        embed.add_field(name="Results Channel", value=channel.mention, inline=False)
+        await interaction.response.edit_message(embed=embed, view=None)
+
+
+class AllianceResultsChannelSetupView(discord.ui.View):
+    def __init__(self, cog, alliance_id: int, alliance_name: str, refresh_rate: int, gift_code_channel_id: int):
+        super().__init__(timeout=300)
+        self.add_item(AllianceResultsChannelSelect(cog, alliance_id, alliance_name, refresh_rate, gift_code_channel_id))
+
 
 async def setup(bot):
     conn = sqlite3.connect('db/alliance.sqlite')
