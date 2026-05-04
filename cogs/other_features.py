@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import sqlite3
 import ssl
+import traceback
 from datetime import datetime
 from cogs.permissions import check_permission
 
@@ -51,105 +52,119 @@ class OtherFeatures(commands.Cog):
                 return data.get('data', {})
 
     async def show_api_pull_alliance_select(self, interaction: discord.Interaction):
-        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
-            await interaction.response.send_message("❌ Only admins can run the API pull.", ephemeral=True)
-            return
+        try:
+            if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+                await interaction.response.send_message("❌ Only admins can run the API pull.", ephemeral=True)
+                return
 
-        with sqlite3.connect('db/alliance.sqlite') as alliance_conn:
-            alliance_cursor = alliance_conn.cursor()
-            alliance_cursor.execute(
-                """
-                SELECT allianceid, name
-                FROM alliancelist
-                WHERE discordserverid = ?
-                ORDER BY name
-                """,
-                (interaction.guild_id,)
+            with sqlite3.connect('db/alliance.sqlite') as alliance_conn:
+                alliance_cursor = alliance_conn.cursor()
+                alliance_cursor.execute(
+                    """
+                    SELECT allianceid, name
+                    FROM alliancelist
+                    WHERE discordserverid = ?
+                    ORDER BY name
+                    """,
+                    (interaction.guild_id,)
+                )
+                alliances = alliance_cursor.fetchall()
+
+            if not alliances:
+                await interaction.response.send_message("❌ No alliances found for this server.", ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title="🌐 API Pull Alliance Members",
+                description="Choose one alliance to refresh from the API.",
+                color=discord.Color.blue()
             )
-            alliances = alliance_cursor.fetchall()
-
-        if not alliances:
-            await interaction.response.send_message("❌ No alliances found for this server.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="🌐 API Pull Alliance Members",
-            description="Choose one alliance to refresh from the API.",
-            color=discord.Color.blue()
-        )
-        await interaction.response.send_message(embed=embed, view=ApiPullAllianceSelectView(self, alliances), ephemeral=True)
+            await interaction.response.send_message(embed=embed, view=ApiPullAllianceSelectView(self, alliances), ephemeral=True)
+        except Exception:
+            traceback.print_exc()
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ An error occurred while loading API Pull alliances.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ An error occurred while loading API Pull alliances.", ephemeral=True)
 
     async def pull_alliance_members_from_api(self, interaction: discord.Interaction, alliance_id: int, alliance_name: str):
-        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
-            await interaction.followup.send("❌ Only admins can run the API pull.", ephemeral=True)
-            return
+        try:
+            if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+                await interaction.followup.send("❌ Only admins can run the API pull.", ephemeral=True)
+                return
 
-        gift_cog = self.bot.get_cog("GiftOperations")
-        if not gift_cog:
-            await interaction.followup.send("❌ Gift Operations module not found.", ephemeral=True)
-            return
+            gift_cog = self.bot.get_cog("GiftOperations")
+            if not gift_cog:
+                await interaction.followup.send("❌ Gift Operations module not found.", ephemeral=True)
+                return
 
-        with sqlite3.connect('db/users.sqlite') as users_conn:
-            users_cursor = users_conn.cursor()
-            users_cursor.execute(
-                "SELECT fid, nickname, furnacelv, kid, stovelvcontent FROM users WHERE alliance = ?",
-                (alliance_id,)
-            )
-            members = users_cursor.fetchall()
-
-        if not members:
-            await interaction.followup.send(f"❌ No stored members found for `{alliance_name}`.", ephemeral=True)
-            return
-
-        updated = 0
-        unchanged = 0
-        failed = 0
-
-        for fid, old_nickname, old_furnace_lv, old_kid, old_stove_lv_content in members:
-            try:
-                player = await self.fetch_player_info(gift_cog, fid)
-                if not player:
-                    failed += 1
-                    continue
-
-                new_nickname = player.get('nickname') or old_nickname
-                new_furnace_lv = player.get('stove_lv') if player.get('stove_lv') is not None else old_furnace_lv
-                new_kid = player.get('kid') if player.get('kid') is not None else old_kid
-                new_stove_lv_content = player.get('stove_lv_content') or old_stove_lv_content
-
-                if (
-                    new_nickname != old_nickname
-                    or new_furnace_lv != old_furnace_lv
-                    or new_kid != old_kid
-                    or new_stove_lv_content != old_stove_lv_content
-                ):
-                    updated += 1
-                else:
-                    unchanged += 1
-
-                self.upsert_api_pull_member(
-                    fid,
-                    new_nickname,
-                    new_furnace_lv,
-                    new_kid,
-                    new_stove_lv_content,
-                    alliance_id
+            with sqlite3.connect('db/users.sqlite') as users_conn:
+                users_cursor = users_conn.cursor()
+                users_cursor.execute(
+                    "SELECT fid, nickname, furnacelv, kid, stovelvcontent FROM users WHERE alliance = ?",
+                    (alliance_id,)
                 )
-                await asyncio.sleep(1)
-            except Exception as e:
-                print(f"[API PULL] Error fetching fid={fid}: {e}")
-                failed += 1
+                members = users_cursor.fetchall()
 
-        embed = discord.Embed(
-            title="✅ API Pull Complete",
-            description=f"Alliance: `{alliance_name}`",
-            color=discord.Color.green() if failed == 0 else discord.Color.orange()
-        )
-        embed.add_field(name="Updated", value=f"`{updated}`", inline=True)
-        embed.add_field(name="Unchanged", value=f"`{unchanged}`", inline=True)
-        embed.add_field(name="Failed", value=f"`{failed}`", inline=True)
-        embed.set_footer(text=f"Processed {len(members)} stored member(s)")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+            if not members:
+                await interaction.followup.send(f"❌ No stored members found for `{alliance_name}`.", ephemeral=True)
+                return
+
+            updated = 0
+            unchanged = 0
+            failed = 0
+
+            for fid, old_nickname, old_furnace_lv, old_kid, old_stove_lv_content in members:
+                try:
+                    player = await self.fetch_player_info(gift_cog, fid)
+                    if not player:
+                        failed += 1
+                        continue
+
+                    new_nickname = player.get('nickname') or old_nickname
+                    new_furnace_lv = player.get('stove_lv') if player.get('stove_lv') is not None else old_furnace_lv
+                    new_kid = player.get('kid') if player.get('kid') is not None else old_kid
+                    new_stove_lv_content = player.get('stove_lv_content') or old_stove_lv_content
+
+                    if (
+                        new_nickname != old_nickname
+                        or new_furnace_lv != old_furnace_lv
+                        or new_kid != old_kid
+                        or new_stove_lv_content != old_stove_lv_content
+                    ):
+                        updated += 1
+                    else:
+                        unchanged += 1
+
+                    self.upsert_api_pull_member(
+                        fid,
+                        new_nickname,
+                        new_furnace_lv,
+                        new_kid,
+                        new_stove_lv_content,
+                        alliance_id
+                    )
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"[API PULL] Error fetching fid={fid}: {e}")
+                    failed += 1
+
+            embed = discord.Embed(
+                title="✅ API Pull Complete",
+                description=f"Alliance: `{alliance_name}`",
+                color=discord.Color.green() if failed == 0 else discord.Color.orange()
+            )
+            embed.add_field(name="Updated", value=f"`{updated}`", inline=True)
+            embed.add_field(name="Unchanged", value=f"`{unchanged}`", inline=True)
+            embed.add_field(name="Failed", value=f"`{failed}`", inline=True)
+            embed.set_footer(text=f"Processed {len(members)} stored member(s)")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception:
+            traceback.print_exc()
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ An error occurred during API Pull Alliance Members.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ An error occurred during API Pull Alliance Members.", ephemeral=True)
         
     async def show_other_features_menu(self, interaction: discord.Interaction):
         try:
@@ -316,10 +331,17 @@ class ApiPullAllianceSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        alliance_id = int(self.values[0])
-        alliance_name = self.alliance_names.get(self.values[0], f"Alliance {alliance_id}")
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        await self.cog.pull_alliance_members_from_api(interaction, alliance_id, alliance_name)
+        try:
+            alliance_id = int(self.values[0])
+            alliance_name = self.alliance_names.get(self.values[0], f"Alliance {alliance_id}")
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            await self.cog.pull_alliance_members_from_api(interaction, alliance_id, alliance_name)
+        except Exception:
+            traceback.print_exc()
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ An error occurred while starting API Pull Alliance Members.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ An error occurred while starting API Pull Alliance Members.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(OtherFeatures(bot)) 
