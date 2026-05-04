@@ -176,7 +176,7 @@ class AllianceMemberOperations(commands.Cog):
         alliance_name = alliance[0] if alliance else f"Alliance {alliance_id}"
 
         self.c_users.execute("""
-            SELECT fid, nickname, furnace_lv, kid
+            SELECT fid, nickname, furnace_lv, kid, discord_id
             FROM users
             WHERE alliance = ?
             ORDER BY nickname COLLATE NOCASE
@@ -192,10 +192,18 @@ class AllianceMemberOperations(commands.Cog):
             description=f"Total members: `{len(members)}`",
             color=discord.Color.blue()
         )
-        for fid, nickname, furnace_lv, kid in members[:25]:
+        for fid, nickname, furnace_lv, kid, discord_id in members[:25]:
+            discord_name = "Unknown"
+            if discord_id is not None:
+                try:
+                    discord_user = await self.bot.fetch_user(int(discord_id))
+                    discord_name = str(discord_user) if discord_user else str(discord_id)
+                except Exception:
+                    discord_name = str(discord_id)
+
             embed.add_field(
                 name=nickname or str(fid),
-                value=f"FID: `{fid}` | Furnace: `{furnace_lv}` | Kingdom: `{kid or 'Unknown'}`",
+                value=f"FID: `{fid}` | Discord: `{discord_name}` | Furnace: `{furnace_lv}` | Kingdom: `{kid or 'Unknown'}`",
                 inline=False
             )
 
