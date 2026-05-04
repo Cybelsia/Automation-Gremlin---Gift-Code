@@ -129,15 +129,46 @@ class AllianceMemberOperations(commands.Cog):
             return [], [], False
 
         is_admin = check_permission(user_id, guild_id, "admin")
+        is_owner = (user_id == 1237812594140512347)
 
-        self.c_alliance.execute("""
-            SELECT alliance_id, name
-            FROM alliance_list
-            WHERE discord_server_id = ?
-            ORDER BY name
-        """, (guild_id,))
-        alliances = self.c_alliance.fetchall()
-        print(f"[DEBUG] get_admin_alliances guild_id={guild_id} raw_results={alliances}")
+        if is_owner or not is_admin:
+            # Owner sees all alliances; mods see all alliances in the server
+            self.c_alliance.execute("""
+                SELECT alliance_id, name
+                FROM alliance_list
+                WHERE discord_server_id = ?
+                ORDER BY name
+            """, (guild_id,))
+            alliances = self.c_alliance.fetchall()
+        else:
+            # Admins only see alliances assigned to them in admin_alliances
+            with sqlite3.connect('db/settings.sqlite') as sdb:
+                scursor = sdb.cursor()
+                scursor.execute("""
+                    SELECT aa.alliance_id
+                    FROM admin_alliances aa
+                    WHERE aa.guild_id = ? AND aa.user_id = ?
+                """, (guild_id, user_id))
+                assigned = [r[0] for r in scursor.fetchall()]
+
+            if not assigned:
+                # No alliances assigned yet — fall back to all (so they aren't locked out)
+                self.c_alliance.execute("""
+                    SELECT alliance_id, name
+                    FROM alliance_list
+                    WHERE discord_server_id = ?
+                    ORDER BY name
+                """, (guild_id,))
+                alliances = self.c_alliance.fetchall()
+            else:
+                placeholders = ",".join("?" * len(assigned))
+                self.c_alliance.execute(f"""
+                    SELECT alliance_id, name
+                    FROM alliance_list
+                    WHERE discord_server_id = ? AND alliance_id IN ({placeholders})
+                    ORDER BY name
+                """, [guild_id] + assigned)
+                alliances = self.c_alliance.fetchall()
 
         alliances_with_counts = []
         for alliance_id, name in alliances:
