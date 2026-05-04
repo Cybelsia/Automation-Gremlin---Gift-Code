@@ -17,16 +17,14 @@ class OtherFeatures(commands.Cog):
         with sqlite3.connect('db/users.sqlite') as users_conn:
             users_conn.execute(
                 """
-                INSERT INTO users (fid, nickname, furnacelv, kid, stovelvcontent, alliance)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(fid) DO UPDATE SET
-                    nickname = excluded.nickname,
-                    furnacelv = excluded.furnacelv,
-                    kid = excluded.kid,
-                    stovelvcontent = excluded.stovelvcontent,
-                    alliance = excluded.alliance
+                UPDATE users
+                SET nickname = ?,
+                    furnace_lv = ?,
+                    kid = ?,
+                    stove_lv_content = ?
+                WHERE fid = ? AND alliance = ?
                 """,
-                (fid, nickname, furnace_lv, kid, stove_lv_content, alliance_id)
+                (nickname, furnace_lv, kid, stove_lv_content, fid, alliance_id)
             )
             users_conn.commit()
 
@@ -95,7 +93,7 @@ class OtherFeatures(commands.Cog):
             with sqlite3.connect('db/users.sqlite') as users_conn:
                 users_cursor = users_conn.cursor()
                 users_cursor.execute(
-                    "SELECT fid, nickname, furnacelv, kid, stovelvcontent FROM users WHERE alliance = ?",
+                    "SELECT fid, nickname, furnace_lv, kid, stove_lv_content FROM users WHERE alliance = ?",
                     (alliance_id,)
                 )
                 members = users_cursor.fetchall()
