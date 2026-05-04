@@ -76,6 +76,13 @@ class BotOperations(commands.Cog):
                 row=1
             ))
             view.add_item(discord.ui.Button(
+                label="Transfer Admin",
+                emoji="🔄",
+                style=discord.ButtonStyle.primary,
+                custom_id="transfer_admin",
+                row=1
+            ))
+            view.add_item(discord.ui.Button(
                 label="Add Mod",
                 emoji="➕",
                 style=discord.ButtonStyle.success,
@@ -252,10 +259,286 @@ class BotOperations(commands.Cog):
                 if not member:
                     await si.response.send_message("❌ Could not find that member in this server.", ephemeral=True)
                     return
-                msg = await perms_cog.do_admin_remove(si.guild_id, member)
-                await si.response.send_message(msg, ephemeral=True)
+
+                # Verify they are actually an admin
+                self.settings_cursor.execute(
+                    "SELECT role FROM permissions WHERE guild_id = ? AND user_id = ?",
+                    (si.guild_id, user_id)
+                )
+                result = self.settings_cursor.fetchone()
+                if not result or result[0] != "admin":
+                    await si.response.send_message("❌ That user is not an admin on this server.", ephemeral=True)
+                    return
+
+                # Ask if they should be demoted to mod instead of fully removed
+                confirm_embed = discord.Embed(
+                    title="➖ Remove Admin",
+                    description=(
+                        f"Removing **<@{user_id}>** as admin.\n\n"
+                        "Would you like to keep them as a **mod**?"
+                    ),
+                    color=discord.Color.orange()
+                )
+                confirm_view = discord.ui.View(timeout=60)
+
+                keep_as_mod_btn = discord.ui.Button(
+                    label="Yes, keep as Mod",
+                    emoji="🔧",
+                    style=discord.ButtonStyle.success,
+                    custom_id="demote_to_mod"
+                )
+                remove_fully_btn = discord.ui.Button(
+                    label="No, remove entirely",
+                    emoji="🗑️",
+                    style=discord.ButtonStyle.danger,
+                    custom_id="remove_fully"
+                )
+
+                async def demote_to_mod_callback(btn_si: discord.Interaction):
+                    # Remove admin role, insert as mod
+                    self.settings_cursor.execute(
+                        "DELETE FROM permissions WHERE guild_id = ? AND user_id = ? AND role = 'admin'",
+                        (btn_si.guild_id, user_id)
+                    )
+                    self.settings_cursor.execute(
+                        """
+                        INSERT INTO permissions (guild_id, user_id, role, appointed_by)
+                        VALUES (?, ?, 'mod', ?)
+                        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                            role = excluded.role,
+                            appointed_by = excluded.appointed_by,
+                            created_at = CURRENT_TIMESTAMP
+                        """,
+                        (btn_si.guild_id, user_id, btn_si.user.id)
+                    )
+                    # Clean up their alliance assignments
+                    self.settings_cursor.execute(
+                        "DELETE FROM admin_alliances WHERE guild_id = ? AND user_id = ?",
+                        (btn_si.guild_id, user_id)
+                    )
+                    self.settings_db.commit()
+                    await btn_si.response.edit_message(
+                        embed=discord.Embed(
+                            title="✅ Admin Demoted to Mod",
+                            description=f"<@{user_id}> has been removed as admin and is now a mod.",
+                            color=discord.Color.green()
+                        ),
+                        view=None
+                    )
+
+                async def remove_fully_callback(btn_si: discord.Interaction):
+                    self.settings_cursor.execute(
+                        "DELETE FROM permissions WHERE guild_id = ? AND user_id = ? AND role = 'admin'",
+                        (btn_si.guild_id, user_id)
+                    )
+                    self.settings_cursor.execute(
+                        "DELETE FROM admin_alliances WHERE guild_id = ? AND user_id = ?",
+                        (btn_si.guild_id, user_id)
+                    )
+                    self.settings_db.commit()
+                    await btn_si.response.edit_message(
+                        embed=discord.Embed(
+                            title="✅ Admin Removed",
+                            description=f"<@{user_id}> has been fully removed from all roles.",
+                            color=discord.Color.green()
+                        ),
+                        view=None
+                    )
+
+                keep_as_mod_btn.callback = demote_to_mod_callback
+                remove_fully_btn.callback = remove_fully_callback
+                confirm_view.add_item(keep_as_mod_btn)
+                confirm_view.add_item(remove_fully_btn)
+                await si.response.send_message(embed=confirm_embed, view=confirm_view, ephemeral=True)
 
             select.callback = remove_admin_callback
+            view.add_item(select)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        # ── Transfer Admin ────────────────────────────────────────
+        elif custom_id == "transfer_admin":
+            if not self.is_owner(interaction.user.id):
+                await interaction.response.send_message("❌ Only the bot owner can transfer admin.", ephemeral=True)
+                return
+
+            # Get current admin
+            self.settings_cursor.execute(
+                "SELECT user_id FROM permissions WHERE guild_id = ? AND role = 'admin'",
+                (interaction.guild_id,)
+            )
+            current_admin_row = self.settings_cursor.fetchone()
+            if not current_admin_row:
+                await interaction.response.send_message("❌ No admin assigned on this server to transfer from.", ephemeral=True)
+                return
+            current_admin_id = current_admin_row[0]
+
+            embed = discord.Embed(
+                title="🔄 Transfer Admin",
+                description=(
+                    f"Current admin: <@{current_admin_id}>\n\n"
+                    "Select the member to transfer admin to:"
+                ),
+                color=discord.Color.blue()
+            )
+            view = discord.ui.View(timeout=60)
+            select = discord.ui.UserSelect(placeholder="Select new admin", custom_id="transfer_admin_select")
+
+            async def transfer_admin_callback(si: discord.Interaction):
+                new_admin_id = int(list(si.data["resolved"]["users"].keys())[0])
+                new_member = si.guild.get_member(new_admin_id)
+
+                # Validation
+                if not new_member:
+                    await si.response.send_message("❌ Could not find that member in this server.", ephemeral=True)
+                    return
+                if new_member.bot:
+                    await si.response.send_message("❌ Bots cannot be appointed as admin.", ephemeral=True)
+                    return
+                if new_admin_id == BOT_OWNER_ID:
+                    await si.response.send_message("❌ The bot owner cannot be assigned an admin role.", ephemeral=True)
+                    return
+                if new_admin_id == current_admin_id:
+                    await si.response.send_message("❌ That user is already the admin.", ephemeral=True)
+                    return
+
+                self.settings_cursor.execute(
+                    "SELECT role FROM permissions WHERE guild_id = ? AND user_id = ?",
+                    (si.guild_id, new_admin_id)
+                )
+                existing = self.settings_cursor.fetchone()
+                if existing and existing[0] == "mod":
+                    await si.response.send_message(
+                        f"❌ <@{new_admin_id}> is currently a mod. Remove their mod role first before transferring admin to them.",
+                        ephemeral=True
+                    )
+                    return
+
+                # Show confirm screen
+                confirm_embed = discord.Embed(
+                    title="🔄 Confirm Admin Transfer",
+                    description=(
+                        f"Transfer admin from <@{current_admin_id}> to <@{new_admin_id}>?\n\n"
+                        "Alliance assignments will be moved to the new admin.\n\n"
+                        "The outgoing admin — would you like to keep them as a **mod**?"
+                    ),
+                    color=discord.Color.orange()
+                )
+                confirm_view = discord.ui.View(timeout=60)
+
+                keep_mod_btn = discord.ui.Button(
+                    label="Transfer + keep as Mod",
+                    emoji="🔧",
+                    style=discord.ButtonStyle.success,
+                    custom_id="transfer_keep_mod"
+                )
+                transfer_only_btn = discord.ui.Button(
+                    label="Transfer + remove entirely",
+                    emoji="🔄",
+                    style=discord.ButtonStyle.primary,
+                    custom_id="transfer_remove"
+                )
+                cancel_btn = discord.ui.Button(
+                    label="Cancel",
+                    emoji="❌",
+                    style=discord.ButtonStyle.secondary,
+                    custom_id="transfer_cancel"
+                )
+
+                async def do_transfer(btn_si: discord.Interaction, keep_as_mod: bool):
+                    try:
+                        # Atomic transfer
+                        self.settings_cursor.execute(
+                            "DELETE FROM permissions WHERE guild_id = ? AND user_id = ? AND role = 'admin'",
+                            (btn_si.guild_id, current_admin_id)
+                        )
+                        if keep_as_mod:
+                            self.settings_cursor.execute(
+                                """
+                                INSERT INTO permissions (guild_id, user_id, role, appointed_by)
+                                VALUES (?, ?, 'mod', ?)
+                                ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                                    role = excluded.role,
+                                    appointed_by = excluded.appointed_by,
+                                    created_at = CURRENT_TIMESTAMP
+                                """,
+                                (btn_si.guild_id, current_admin_id, btn_si.user.id)
+                            )
+                        else:
+                            self.settings_cursor.execute(
+                                "DELETE FROM permissions WHERE guild_id = ? AND user_id = ?",
+                                (btn_si.guild_id, current_admin_id)
+                            )
+                        # Insert new admin
+                        self.settings_cursor.execute(
+                            """
+                            INSERT INTO permissions (guild_id, user_id, role, appointed_by)
+                            VALUES (?, ?, 'admin', ?)
+                            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                                role = excluded.role,
+                                appointed_by = excluded.appointed_by,
+                                created_at = CURRENT_TIMESTAMP
+                            """,
+                            (btn_si.guild_id, new_admin_id, btn_si.user.id)
+                        )
+                        # Move alliance assignments
+                        self.settings_cursor.execute(
+                            "SELECT alliance_id FROM admin_alliances WHERE guild_id = ? AND user_id = ?",
+                            (btn_si.guild_id, current_admin_id)
+                        )
+                        old_assignments = self.settings_cursor.fetchall()
+                        self.settings_cursor.execute(
+                            "DELETE FROM admin_alliances WHERE guild_id = ? AND user_id = ?",
+                            (btn_si.guild_id, current_admin_id)
+                        )
+                        for (aid,) in old_assignments:
+                            self.settings_cursor.execute(
+                                "INSERT OR IGNORE INTO admin_alliances (guild_id, user_id, alliance_id) VALUES (?, ?, ?)",
+                                (btn_si.guild_id, new_admin_id, aid)
+                            )
+                        self.settings_db.commit()
+
+                        old_status = "demoted to mod" if keep_as_mod else "fully removed"
+                        await btn_si.response.edit_message(
+                            embed=discord.Embed(
+                                title="✅ Admin Transferred",
+                                description=(
+                                    f"<@{new_admin_id}> is now the server admin.\n"
+                                    f"<@{current_admin_id}> has been {old_status}.\n"
+                                    f"Alliance assignments moved: {len(old_assignments)}"
+                                ),
+                                color=discord.Color.green()
+                            ),
+                            view=None
+                        )
+                    except Exception as e:
+                        print(f"Error during admin transfer: {e}")
+                        await btn_si.response.send_message("❌ An error occurred during transfer.", ephemeral=True)
+
+                async def keep_mod_callback(btn_si: discord.Interaction):
+                    await do_transfer(btn_si, keep_as_mod=True)
+
+                async def transfer_only_callback(btn_si: discord.Interaction):
+                    await do_transfer(btn_si, keep_as_mod=False)
+
+                async def cancel_callback(btn_si: discord.Interaction):
+                    await btn_si.response.edit_message(
+                        embed=discord.Embed(
+                            title="❌ Transfer Cancelled",
+                            description="No changes were made.",
+                            color=discord.Color.red()
+                        ),
+                        view=None
+                    )
+
+                keep_mod_btn.callback = keep_mod_callback
+                transfer_only_btn.callback = transfer_only_callback
+                cancel_btn.callback = cancel_callback
+                confirm_view.add_item(keep_mod_btn)
+                confirm_view.add_item(transfer_only_btn)
+                confirm_view.add_item(cancel_btn)
+                await si.response.send_message(embed=confirm_embed, view=confirm_view, ephemeral=True)
+
+            select.callback = transfer_admin_callback
             view.add_item(select)
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
