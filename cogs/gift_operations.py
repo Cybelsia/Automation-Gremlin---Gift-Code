@@ -84,9 +84,14 @@ class GiftOperations(commands.Cog):
                 api_status_code INTEGER,
                 api_response_body TEXT,
                 retry_count INTEGER DEFAULT 0,
+                status TEXT,
                 created_at TEXT NOT NULL
             )
         """)
+        self.gift_operations_cursor.execute("PRAGMA table_info(redemption_failures)")
+        redemption_failure_columns = [column[1] for column in self.gift_operations_cursor.fetchall()]
+        if "status" not in redemption_failure_columns:
+            self.gift_operations_cursor.execute("ALTER TABLE redemption_failures ADD COLUMN status TEXT")
         self.gift_operations_conn.commit()
         
         self.cursor.execute("""
@@ -135,10 +140,10 @@ class GiftOperations(commands.Cog):
             INSERT INTO redemption_failures (
                 redemption_id, job_type, final_state, gift_code, fid, alliance_id,
                 alliance_name, guild_id, error_reason, exception_message,
-                exception_type, api_status_code, api_response_body, retry_count,
+                exception_type, api_status_code, api_response_body, retry_count, status,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 details.get("redemption_id"),
@@ -155,6 +160,7 @@ class GiftOperations(commands.Cog):
                 details.get("api_status_code"),
                 details.get("api_response_body"),
                 details.get("retry_count", 0),
+                details.get("status"),
                 details.get("timestamp"),
             )
         )
@@ -184,6 +190,17 @@ class GiftOperations(commands.Cog):
         embed.add_field(name="HTTP", value=f"`{details.get('api_status_code')}`", inline=True)
         embed.add_field(name="Redemption ID", value=f"`{details.get('redemption_id')}`", inline=False)
         await channel.send(embed=embed)
+
+    def classify_redemption_status(self, details):
+        api_status_code = details.get("api_status_code")
+        reason = str(details.get("error_reason") or "").lower()
+        response_body = str(details.get("api_response_body") or "").lower()
+        combined = f"{reason} {response_body}"
+        if api_status_code == 429 or "rate limit" in combined or "too many" in combined:
+            return "code_rate_limited"
+        if any(token in combined for token in ("params error", "invalid", "expired", "depleted", "blocked", "not found", "not exist")):
+            return "code_invalid"
+        return "member_failed"
 
     @tasks.loop(seconds=60)
     async def alliance_scheduler(self):
@@ -257,10 +274,48 @@ class GiftOperations(commands.Cog):
                 final_failed_jobs = 0
                 failure_details = []
                 for gift_code in found_codes:
-                    for (fid,) in members:
+                    first_fid = members[0][0]
+                    print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=starting")
+                    ok, result = await self.redeem_gift_code_for_fid(first_fid, gift_code)
+                    if ok:
+                        total_success += 1
+                        print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=member_redeemed action=continue_member_fanout")
+                        member_iterable = members[1:]
+                    else:
+                        failed_member_codes += 1
+                        final_failed_jobs += 1
+                        details = result if isinstance(result, dict) else {
+                            "error_reason": str(result),
+                            "gift_code": gift_code,
+                            "fid": first_fid,
+                            "timestamp": datetime.utcnow().isoformat()
+                        }
+                        status = self.classify_redemption_status(details)
+                        details.update({
+                            "job_type": "scheduled",
+                            "final_state": "job_failed_final" if status in ("code_invalid", "code_rate_limited") else "member_failed",
+                            "status": status,
+                            "alliance_id": alliance_id,
+                            "alliance_name": name,
+                            "guild_id": guild_id,
+                        })
+                        failed_request_attempts += details.get("request_attempts", 1)
+                        self.save_redemption_failure(details)
+                        failure_details.append(details)
+                        print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status={status}")
+                        print(f"[SCHEDULER-REDEEM-FAIL] {json.dumps(details, ensure_ascii=False)}")
+                        await self.send_redemption_failure_summary(guild, results_channel, details)
+                        if status in ("code_invalid", "code_rate_limited"):
+                            print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} status={status} action=stop_member_fanout")
+                            await asyncio.sleep(1)
+                            continue
+                        member_iterable = members[1:]
+
+                    for (fid,) in member_iterable:
                         ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
                         if ok:
                             total_success += 1
+                            print(f"[SCHEDULER-REDEEM] code={gift_code} fid={fid} status=member_redeemed")
                         else:
                             failed_member_codes += 1
                             final_failed_jobs += 1
@@ -270,10 +325,12 @@ class GiftOperations(commands.Cog):
                                 "fid": fid,
                                 "timestamp": datetime.utcnow().isoformat()
                             }
+                            status = self.classify_redemption_status(details)
                             failed_request_attempts += details.get("request_attempts", 1)
                             details.update({
                                 "job_type": "scheduled",
-                                "final_state": "failed",
+                                "final_state": "member_failed",
+                                "status": status,
                                 "alliance_id": alliance_id,
                                 "alliance_name": name,
                                 "guild_id": guild_id,
@@ -904,6 +961,7 @@ class GiftOperations(commands.Cog):
                                 "request_attempts": attempt,
                                 "timestamp": timestamp,
                                 "final_state": "retrying" if attempt < self.redemption_max_attempts else "failed",
+                                "status": "code_rate_limited",
                             }
                             if attempt < self.redemption_max_attempts:
                                 delay = self.get_redemption_retry_delay(response, attempt)
@@ -926,6 +984,7 @@ class GiftOperations(commands.Cog):
                                 "request_attempts": attempt,
                                 "timestamp": timestamp,
                                 "final_state": "failed",
+                                "status": "member_failed",
                             }
 
                         try:
@@ -944,10 +1003,11 @@ class GiftOperations(commands.Cog):
                                 "request_attempts": attempt,
                                 "timestamp": timestamp,
                                 "final_state": "failed",
+                                "status": "member_failed",
                             }
 
                         if data.get("code") == 0 or data.get("success") is True:
-                            return True, response_text
+                            return True, {"status": "member_redeemed", "response_body": response_text, "request_attempts": attempt, "retry_count": retry_count}
 
                         return False, {
                             "redemption_id": redemption_id,
@@ -962,6 +1022,7 @@ class GiftOperations(commands.Cog):
                             "request_attempts": attempt,
                             "timestamp": timestamp,
                             "final_state": "failed",
+                            "status": "member_failed",
                         }
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                     last_failure = {
@@ -977,6 +1038,7 @@ class GiftOperations(commands.Cog):
                         "request_attempts": attempt,
                         "timestamp": timestamp,
                         "final_state": "retrying" if attempt < self.redemption_max_attempts else "failed",
+                        "status": "member_failed",
                     }
                     if attempt < self.redemption_max_attempts:
                         delay = self.get_redemption_retry_delay(None, attempt)
