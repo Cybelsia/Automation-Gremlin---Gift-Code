@@ -123,8 +123,8 @@ class GiftOperations(commands.Cog):
         self._last_run: dict[int, float] = {}
         self._alliance_scheduler_lock = asyncio.Lock()
         self.redemption_max_attempts = 3
-        self.redemption_base_backoff = 2
-        self.redemption_max_backoff = 60
+        self.redemption_base_backoff = 1
+        self.redemption_max_backoff = 30
         self.alliance_scheduler.start()
         self.weekly_member_scan.start()
 
@@ -937,160 +937,166 @@ class GiftOperations(commands.Cog):
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
 
+        return await self.request_redemption_with_backoff(
+            fid=fid,
+            gift_code=gift_code,
+            form_data=form_data,
+            headers=headers,
+            ssl_context=ssl_context,
+            redemption_id=redemption_id,
+        )
+
+    async def request_redemption_with_backoff(self, fid: int, gift_code: str, form_data: str, headers: dict, ssl_context, redemption_id: str):
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
-            last_failure = None
+            last_result = None
             for attempt in range(1, self.redemption_max_attempts + 1):
-                retry_count = attempt - 1
-                timestamp = datetime.utcnow().isoformat()
-                print(f"[WOS-REDEEM-REQUEST] fid={fid} code={gift_code} form={form_data}")
                 try:
+                    print(f"[WOS-REDEEM-REQUEST] function=request_redemption_with_backoff fid={fid} code={gift_code} attempt={attempt} form={form_data}")
                     async with session.post(self.wos_giftcode_url, headers=headers, data=form_data) as response:
                         response_text = await response.text()
-                        print(f"[WOS-REDEEM-RESPONSE] fid={fid} attempt={attempt} status={response.status} body={response_text}")
+                        print(f"[WOS-REDEEM-RESPONSE] function=request_redemption_with_backoff fid={fid} code={gift_code} attempt={attempt} status={response.status} body={response_text}")
+                        last_result = self.build_redemption_result(
+                            fid=fid,
+                            gift_code=gift_code,
+                            redemption_id=redemption_id,
+                            success=False,
+                            status="code_rate_limited" if response.status == 429 else "member_failed",
+                            attempts_used=attempt,
+                            retry_after_used=False,
+                            final_error_reason=f"HTTP {response.status}" if response.status != 200 else None,
+                            api_status_code=response.status,
+                            api_response_body=response_text,
+                        )
                         if response.status == 429:
-                            last_failure = {
-                                "redemption_id": redemption_id,
-                                "gift_code": gift_code,
-                                "fid": fid,
-                                "error_reason": "HTTP 429 rate limited",
-                                "exception_message": None,
-                                "exception_type": None,
-                                "api_status_code": response.status,
-                                "api_response_body": response_text,
-                                "retry_count": retry_count,
-                                "request_attempts": attempt,
-                                "timestamp": timestamp,
-                                "final_state": "retrying" if attempt < self.redemption_max_attempts else "failed",
-                                "status": "code_rate_limited",
-                            }
                             if attempt < self.redemption_max_attempts:
-                                delay = self.get_redemption_retry_delay(response, attempt)
-                                print(f"[WOS-REDEEM-RETRY] fid={fid} code={gift_code} attempt={attempt} status=429 sleep={delay:.2f}s")
+                                delay, retry_after_used = self.get_redemption_retry_delay(response, attempt)
+                                last_result["retry_after_used"] = retry_after_used
+                                self.log_redemption_retry(gift_code, fid, attempt, delay, "HTTP 429")
                                 await asyncio.sleep(delay)
                                 continue
-                            return False, last_failure
-
+                            last_result["final_error_reason"] = "HTTP 429 rate limited"
+                            last_result["error_reason"] = "HTTP 429 rate limited"
+                            last_result["final_state"] = "failed"
+                            return False, last_result
                         if response.status != 200:
-                            return False, {
-                                "redemption_id": redemption_id,
-                                "gift_code": gift_code,
-                                "fid": fid,
-                                "error_reason": f"HTTP {response.status}",
-                                "exception_message": None,
-                                "exception_type": None,
-                                "api_status_code": response.status,
-                                "api_response_body": response_text,
-                                "retry_count": retry_count,
-                                "request_attempts": attempt,
-                                "timestamp": timestamp,
-                                "final_state": "failed",
-                                "status": "member_failed",
-                            }
-
+                            return False, last_result
                         try:
                             data = json.loads(response_text)
                         except json.JSONDecodeError as e:
-                            return False, {
-                                "redemption_id": redemption_id,
-                                "gift_code": gift_code,
-                                "fid": fid,
+                            last_result.update({
+                                "final_error_reason": "Invalid JSON response",
                                 "error_reason": "Invalid JSON response",
                                 "exception_message": str(e),
                                 "exception_type": type(e).__name__,
-                                "api_status_code": response.status,
-                                "api_response_body": response_text,
-                                "retry_count": retry_count,
-                                "request_attempts": attempt,
-                                "timestamp": timestamp,
-                                "final_state": "failed",
-                                "status": "member_failed",
-                            }
-
+                            })
+                            return False, last_result
                         if data.get("code") == 0 or data.get("success") is True:
-                            return True, {"status": "member_redeemed", "response_body": response_text, "request_attempts": attempt, "retry_count": retry_count}
-
-                        return False, {
-                            "redemption_id": redemption_id,
-                            "gift_code": gift_code,
-                            "fid": fid,
-                            "error_reason": self.get_gift_code_failure_reason(data),
+                            return True, self.build_redemption_result(
+                                fid=fid,
+                                gift_code=gift_code,
+                                redemption_id=redemption_id,
+                                success=True,
+                                status="member_redeemed",
+                                attempts_used=attempt,
+                                retry_after_used=last_result.get("retry_after_used", False) if last_result else False,
+                                final_error_reason=None,
+                                api_status_code=response.status,
+                                api_response_body=response_text,
+                            )
+                        failure_reason = self.get_gift_code_failure_reason(data)
+                        last_result.update({
+                            "final_error_reason": failure_reason,
+                            "error_reason": failure_reason,
                             "exception_message": data.get("msg"),
                             "exception_type": "WOSApiError",
-                            "api_status_code": response.status,
-                            "api_response_body": response_text,
-                            "retry_count": retry_count,
-                            "request_attempts": attempt,
-                            "timestamp": timestamp,
-                            "final_state": "failed",
-                            "status": "member_failed",
-                        }
+                        })
+                        return False, last_result
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                    last_failure = {
-                        "redemption_id": redemption_id,
-                        "gift_code": gift_code,
-                        "fid": fid,
-                        "error_reason": str(e),
-                        "exception_message": str(e),
-                        "exception_type": type(e).__name__,
-                        "api_status_code": None,
-                        "api_response_body": None,
-                        "retry_count": retry_count,
-                        "request_attempts": attempt,
-                        "timestamp": timestamp,
-                        "final_state": "retrying" if attempt < self.redemption_max_attempts else "failed",
-                        "status": "member_failed",
-                    }
+                    last_result = self.build_redemption_result(
+                        fid=fid,
+                        gift_code=gift_code,
+                        redemption_id=redemption_id,
+                        success=False,
+                        status="member_failed",
+                        attempts_used=attempt,
+                        retry_after_used=False,
+                        final_error_reason=str(e),
+                        api_status_code=None,
+                        api_response_body=None,
+                        exception=e,
+                    )
                     if attempt < self.redemption_max_attempts:
-                        delay = self.get_redemption_retry_delay(None, attempt)
-                        print(f"[WOS-REDEEM-RETRY] fid={fid} code={gift_code} attempt={attempt} exception={type(e).__name__} sleep={delay:.2f}s")
+                        delay, retry_after_used = self.get_redemption_retry_delay(None, attempt)
+                        last_result["retry_after_used"] = retry_after_used
+                        self.log_redemption_retry(gift_code, fid, attempt, delay, type(e).__name__)
                         await asyncio.sleep(delay)
                         continue
-                    return False, last_failure
+                    return False, last_result
                 except Exception as e:
-                    return False, {
-                        "redemption_id": redemption_id,
-                        "gift_code": gift_code,
-                        "fid": fid,
-                        "error_reason": str(e),
-                        "exception_message": str(e),
-                        "exception_type": type(e).__name__,
-                        "api_status_code": None,
-                        "api_response_body": None,
-                        "retry_count": retry_count,
-                        "request_attempts": attempt,
-                        "timestamp": timestamp,
-                        "final_state": "failed",
-                    }
+                    return False, self.build_redemption_result(
+                        fid=fid,
+                        gift_code=gift_code,
+                        redemption_id=redemption_id,
+                        success=False,
+                        status="member_failed",
+                        attempts_used=attempt,
+                        retry_after_used=False,
+                        final_error_reason=str(e),
+                        api_status_code=None,
+                        api_response_body=None,
+                        exception=e,
+                    )
 
-            if last_failure:
-                last_failure["final_state"] = "failed"
-                return False, last_failure
+            if last_result:
+                return False, last_result
 
-            return False, {
-                "redemption_id": redemption_id,
-                "gift_code": gift_code,
-                "fid": fid,
-                "error_reason": "Redemption failed without response",
-                "exception_message": None,
-                "exception_type": None,
-                "api_status_code": None,
-                "api_response_body": None,
-                "retry_count": self.redemption_max_attempts - 1,
-                "request_attempts": self.redemption_max_attempts,
-                "timestamp": datetime.utcnow().isoformat(),
-                "final_state": "failed",
-            }
+            return False, self.build_redemption_result(
+                fid=fid,
+                gift_code=gift_code,
+                redemption_id=redemption_id,
+                success=False,
+                status="member_failed",
+                attempts_used=self.redemption_max_attempts,
+                retry_after_used=False,
+                final_error_reason="Redemption failed without response",
+                api_status_code=None,
+                api_response_body=None,
+            )
 
-    def get_redemption_retry_delay(self, response, attempt: int) -> float:
+    def build_redemption_result(self, fid: int, gift_code: str, redemption_id: str, success: bool, status: str, attempts_used: int, retry_after_used: bool, final_error_reason, api_status_code, api_response_body, exception=None):
+        return {
+            "success": success,
+            "status": status,
+            "attempts_used": attempts_used,
+            "request_attempts": attempts_used,
+            "retry_count": max(attempts_used - 1, 0),
+            "retry_after_used": retry_after_used,
+            "final_error_reason": final_error_reason,
+            "redemption_id": redemption_id,
+            "gift_code": gift_code,
+            "fid": fid,
+            "error_reason": final_error_reason,
+            "exception_message": str(exception) if exception else None,
+            "exception_type": type(exception).__name__ if exception else None,
+            "api_status_code": api_status_code,
+            "api_response_body": api_response_body,
+            "timestamp": datetime.utcnow().isoformat(),
+            "final_state": "failed" if not success else "succeeded",
+        }
+
+    def log_redemption_retry(self, gift_code: str, fid: int, attempt: int, delay: float, reason: str):
+        print(f"[WOS-REDEEM-RETRY] function=request_redemption_with_backoff code={gift_code} fid={fid} attempt={attempt} delay={delay:.2f}s reason={reason}")
+
+    def get_redemption_retry_delay(self, response, attempt: int):
         if response is not None:
             retry_after = response.headers.get("Retry-After")
             if retry_after:
                 try:
-                    return min(float(retry_after), self.redemption_max_backoff)
+                    return min(float(retry_after), self.redemption_max_backoff), True
                 except ValueError:
                     pass
         exponential = min(self.redemption_base_backoff * (2 ** (attempt - 1)), self.redemption_max_backoff)
-        return exponential + random.uniform(0, 1)
+        return exponential + random.uniform(0, 1), False
 
     async def create_gift_code_for_alliance(self, interaction: discord.Interaction, gift_code: str, alliance_id: int, alliance_name: str):
         if interaction.guild_id is None:
