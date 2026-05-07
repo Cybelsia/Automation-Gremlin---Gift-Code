@@ -65,6 +65,26 @@ class GiftOperations(commands.Cog):
                 PRIMARY KEY (guild_id, alliance_id)
             )
         """)
+        self.gift_operations_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS redemption_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                redemption_id TEXT NOT NULL,
+                job_type TEXT NOT NULL,
+                final_state TEXT NOT NULL,
+                gift_code TEXT NOT NULL,
+                fid INTEGER,
+                alliance_id INTEGER,
+                alliance_name TEXT,
+                guild_id INTEGER,
+                error_reason TEXT,
+                exception_message TEXT,
+                exception_type TEXT,
+                api_status_code INTEGER,
+                api_response_body TEXT,
+                retry_count INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
         self.gift_operations_conn.commit()
         
         self.cursor.execute("""
@@ -98,8 +118,66 @@ class GiftOperations(commands.Cog):
         self.weekly_member_scan.start()
 
     def cog_unload(self):
+        if hasattr(self.api, "cancel"):
+            self.api.cancel()
         self.alliance_scheduler.cancel()
         self.weekly_member_scan.cancel()
+
+    def save_redemption_failure(self, details):
+        self.gift_operations_cursor.execute(
+            """
+            INSERT INTO redemption_failures (
+                redemption_id, job_type, final_state, gift_code, fid, alliance_id,
+                alliance_name, guild_id, error_reason, exception_message,
+                exception_type, api_status_code, api_response_body, retry_count,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                details.get("redemption_id"),
+                details.get("job_type", "unknown"),
+                details.get("final_state", "failed"),
+                details.get("gift_code"),
+                details.get("fid"),
+                details.get("alliance_id"),
+                details.get("alliance_name"),
+                details.get("guild_id"),
+                details.get("error_reason"),
+                details.get("exception_message"),
+                details.get("exception_type"),
+                details.get("api_status_code"),
+                details.get("api_response_body"),
+                details.get("retry_count", 0),
+                details.get("timestamp"),
+            )
+        )
+        self.gift_operations_conn.commit()
+
+    def get_alliance_log_channel_id(self, alliance_id: int):
+        self.settings_cursor.execute(
+            "SELECT channel_id FROM alliance_logs WHERE alliance_id = ?",
+            (alliance_id,)
+        )
+        row = self.settings_cursor.fetchone()
+        return row[0] if row else None
+
+    async def send_redemption_failure_summary(self, guild, fallback_channel, details):
+        channel_id = self.get_alliance_log_channel_id(details.get("alliance_id"))
+        channel = guild.get_channel(channel_id) if channel_id else fallback_channel
+        if channel is None:
+            return
+        embed = discord.Embed(
+            title="⚠️ Scheduled Gift Redemption Failed",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="Code", value=f"`{details.get('gift_code')}`", inline=True)
+        embed.add_field(name="FID", value=f"`{details.get('fid')}`", inline=True)
+        embed.add_field(name="State", value=f"`{details.get('final_state')}`", inline=True)
+        embed.add_field(name="Reason", value=f"`{str(details.get('error_reason'))[:900]}`", inline=False)
+        embed.add_field(name="HTTP", value=f"`{details.get('api_status_code')}`", inline=True)
+        embed.add_field(name="Redemption ID", value=f"`{details.get('redemption_id')}`", inline=False)
+        await channel.send(embed=embed)
 
     @tasks.loop(seconds=60)
     async def alliance_scheduler(self):
@@ -161,13 +239,31 @@ class GiftOperations(commands.Cog):
 
                 total_success = 0
                 total_failed = 0
+                failure_details = []
                 for gift_code in found_codes:
                     for (fid,) in members:
-                        ok, _ = await self.redeem_gift_code_for_fid(fid, gift_code)
+                        ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
                         if ok:
                             total_success += 1
                         else:
                             total_failed += 1
+                            details = result if isinstance(result, dict) else {
+                                "error_reason": str(result),
+                                "gift_code": gift_code,
+                                "fid": fid,
+                                "timestamp": datetime.utcnow().isoformat()
+                            }
+                            details.update({
+                                "job_type": "scheduled",
+                                "final_state": "failed",
+                                "alliance_id": alliance_id,
+                                "alliance_name": name,
+                                "guild_id": guild_id,
+                            })
+                            self.save_redemption_failure(details)
+                            failure_details.append(details)
+                            print(f"[SCHEDULER-REDEEM-FAIL] {json.dumps(details, ensure_ascii=False)}")
+                            await self.send_redemption_failure_summary(guild, results_channel, details)
                         await asyncio.sleep(1)
 
                 embed = discord.Embed(
@@ -179,6 +275,12 @@ class GiftOperations(commands.Cog):
                 embed.add_field(name="Members Processed", value=f"`{len(members)}`", inline=True)
                 embed.add_field(name="Succeeded", value=f"`{total_success}`", inline=True)
                 embed.add_field(name="Failed", value=f"`{total_failed}`", inline=True)
+                if failure_details:
+                    preview = "\n".join(
+                        f"FID `{item.get('fid')}`: `{str(item.get('error_reason'))[:80]}`"
+                        for item in failure_details[:5]
+                    )
+                    embed.add_field(name="Failure Details", value=preview, inline=False)
                 await results_channel.send(embed=embed)
 
         except Exception as e:
@@ -580,8 +682,10 @@ class GiftOperations(commands.Cog):
                     ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
                     if ok:
                         total_success += 1
+                        print(f"[AUTO-GIFT] SUCCESS fid={fid} code={gift_code}")
                     else:
                         total_failed += 1
+                        print(f"[AUTO-GIFT] FAIL fid={fid} code={gift_code} reason={result}")
                     await asyncio.sleep(1)
 
         return {
@@ -743,6 +847,9 @@ class GiftOperations(commands.Cog):
         form = f"cdk={gift_code}&fid={fid}&time={time_val}"
         sign = hashlib.md5((form + self.wos_encrypt_key).encode('utf-8')).hexdigest()
         form_data = f"cdk={gift_code}&fid={fid}&sign={sign}&time={time_val}"
+        redemption_id = f"{gift_code}:{fid}:{time_val}"
+        retry_count = 0
+        timestamp = datetime.utcnow().isoformat()
         headers = {
             "accept": "application/json, text/plain, */*",
             "content-type": "application/x-www-form-urlencoded",
@@ -756,20 +863,73 @@ class GiftOperations(commands.Cog):
         ssl_context.verify_mode = ssl.CERT_NONE
 
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
-            async with session.post(self.wos_giftcode_url, headers=headers, data=form_data) as response:
-                response_text = await response.text()
-                if response.status != 200:
-                    return False, f"HTTP {response.status}: {response_text}"
+            try:
+                print(f"[WOS-REDEEM-REQUEST] fid={fid} code={gift_code} form={form_data}")
+                async with session.post(self.wos_giftcode_url, headers=headers, data=form_data) as response:
+                    response_text = await response.text()
+                    print(f"[WOS-REDEEM-RESPONSE] fid={fid} status={response.status} body={response_text}")
+                    if response.status != 200:
+                        return False, {
+                            "redemption_id": redemption_id,
+                            "gift_code": gift_code,
+                            "fid": fid,
+                            "error_reason": f"HTTP {response.status}",
+                            "exception_message": None,
+                            "exception_type": None,
+                            "api_status_code": response.status,
+                            "api_response_body": response_text,
+                            "retry_count": retry_count,
+                            "timestamp": timestamp,
+                            "final_state": "failed",
+                        }
 
-                try:
-                    data = json.loads(response_text)
-                except json.JSONDecodeError:
-                    return False, "Unknown error"
+                    try:
+                        data = json.loads(response_text)
+                    except json.JSONDecodeError as e:
+                        return False, {
+                            "redemption_id": redemption_id,
+                            "gift_code": gift_code,
+                            "fid": fid,
+                            "error_reason": "Invalid JSON response",
+                            "exception_message": str(e),
+                            "exception_type": type(e).__name__,
+                            "api_status_code": response.status,
+                            "api_response_body": response_text,
+                            "retry_count": retry_count,
+                            "timestamp": timestamp,
+                            "final_state": "failed",
+                        }
 
-                if data.get("code") == 0 or data.get("success") is True:
-                    return True, response_text
+                    if data.get("code") == 0 or data.get("success") is True:
+                        return True, response_text
 
-                return False, self.get_gift_code_failure_reason(data)
+                    return False, {
+                        "redemption_id": redemption_id,
+                        "gift_code": gift_code,
+                        "fid": fid,
+                        "error_reason": self.get_gift_code_failure_reason(data),
+                        "exception_message": data.get("msg"),
+                        "exception_type": "WOSApiError",
+                        "api_status_code": response.status,
+                        "api_response_body": response_text,
+                        "retry_count": retry_count,
+                        "timestamp": timestamp,
+                        "final_state": "failed",
+                    }
+            except Exception as e:
+                return False, {
+                    "redemption_id": redemption_id,
+                    "gift_code": gift_code,
+                    "fid": fid,
+                    "error_reason": str(e),
+                    "exception_message": str(e),
+                    "exception_type": type(e).__name__,
+                    "api_status_code": None,
+                    "api_response_body": None,
+                    "retry_count": retry_count,
+                    "timestamp": timestamp,
+                    "final_state": "failed",
+                }
 
     async def create_gift_code_for_alliance(self, interaction: discord.Interaction, gift_code: str, alliance_id: int, alliance_name: str):
         if interaction.guild_id is None:

@@ -225,13 +225,22 @@ def run_bot():
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-        for task in pending:
-            task.cancel()
-
         if stop_task in done and not bot.is_closed():
             await bot.close()
 
+        for task in pending:
+            task.cancel()
+
         await asyncio.gather(*pending, return_exceptions=True)
+
+        remaining_tasks = [
+            task for task in asyncio.all_tasks(loop)
+            if task is not asyncio.current_task(loop) and not task.done()
+        ]
+        for task in remaining_tasks:
+            task.cancel()
+        if remaining_tasks:
+            await asyncio.gather(*remaining_tasks, return_exceptions=True)
 
     try:
         loop.run_until_complete(runner())

@@ -33,7 +33,7 @@ class GiftCodeAPI:
         self.ssl_context.check_hostname = False
         self.ssl_context.verify_mode = ssl.CERT_NONE
         
-        asyncio.create_task(self.start_api_check())
+        self.api_check_task = asyncio.create_task(self.start_api_check())
 
     async def start_api_check(self):
         try:
@@ -43,8 +43,14 @@ class GiftCodeAPI:
             while True:
                 await asyncio.sleep(self.check_interval)
                 await self.sync_with_api()
+        except asyncio.CancelledError:
+            return
         except Exception as e:
             traceback.print_exc()
+
+    def cancel(self):
+        if hasattr(self, "api_check_task") and not self.api_check_task.done():
+            self.api_check_task.cancel()
 
     def __del__(self):
         try:
