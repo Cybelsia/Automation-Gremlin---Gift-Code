@@ -929,7 +929,7 @@ class GiftOperations(commands.Cog):
         fid_value = str(fid)
         form = f"cdk={gift_code}&fid={fid_value}&time={time_val}"
         sign = hashlib.md5((form + self.wos_encrypt_key).encode('utf-8')).hexdigest()
-        form_data = {"cdk": gift_code, "fid": fid_value, "sign": sign, "time": time_val}
+        form_data = {"cdk": gift_code, "fid": fid_value, "time": time_val, "sign": sign}
         redemption_id = f"{gift_code}:{fid}:{time_val}"
         headers = {
             "accept": "application/json, text/plain, */*",
