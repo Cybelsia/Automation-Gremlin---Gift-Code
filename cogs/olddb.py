@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands, ui
 import sqlite3
 import os
+from paths import *
 
 class AllianceSelect(ui.Select):
     def __init__(self, alliances):
@@ -48,7 +49,7 @@ class DatabaseTransfer(commands.Cog):
         await interaction.response.send_message(embeds=[warning_embed], view=view, ephemeral=True)
 
     async def check_alliances(self):
-        conn = sqlite3.connect('db/alliance.sqlite')
+        conn = sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite'))
         cursor = conn.cursor()
         cursor.execute("SELECT alliance_id, name FROM alliance_list")
         alliances = cursor.fetchall()
@@ -58,7 +59,8 @@ class DatabaseTransfer(commands.Cog):
     async def olddatabase(self, interaction: discord.Interaction):
         embed = discord.Embed(title="Database Transfer", color=discord.Color.orange())
 
-        if not os.path.exists('gift_db.sqlite'):
+        source_db_path = resolve_path("gift_db.sqlite")
+        if not source_db_path.exists():
             embed.add_field(name="Status", value="gift_db.sqlite not found.", inline=False)
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
@@ -67,27 +69,27 @@ class DatabaseTransfer(commands.Cog):
         message = await interaction.followup.send(embed=embed, ephemeral=True)
 
         transfer_steps = [
-            ("gift_db.sqlite", "admin", "settings.sqlite"),
-            ("gift_db.sqlite", "alliance_channels", "alliance.sqlite"),
-            ("gift_db.sqlite", "alliance_intervals", "alliance.sqlite"),
-            ("gift_db.sqlite", "alliance_list", "alliance.sqlite"),
-            ("gift_db.sqlite", "botsettings", "settings.sqlite"),
-            ("gift_db.sqlite", "furnace_changes", "changes.sqlite"),
-            ("gift_db.sqlite", "nickname_changes", "changes.sqlite"),
-            ("gift_db.sqlite", "gift_codes", "giftcode.sqlite"),
-            ("gift_db.sqlite", "user_giftcodes", "giftcode.sqlite"),
-            ("gift_db.sqlite", "users", "users.sqlite")
+            (source_db_path, "admin", "settings.sqlite"),
+            (source_db_path, "alliance_channels", "alliance.sqlite"),
+            (source_db_path, "alliance_intervals", "alliance.sqlite"),
+            (source_db_path, "alliance_list", "alliance.sqlite"),
+            (source_db_path, "botsettings", "settings.sqlite"),
+            (source_db_path, "furnace_changes", "changes.sqlite"),
+            (source_db_path, "nickname_changes", "changes.sqlite"),
+            (source_db_path, "gift_codes", "giftcode.sqlite"),
+            (source_db_path, "user_giftcodes", "giftcode.sqlite"),
+            (source_db_path, "users", "users.sqlite")
         ]
 
         db_connections = {}
         
         for source, table, destination in transfer_steps:
-            destination_path = f'db/{destination}'
+            destination_path = DB_DIR / destination
             
             if source not in db_connections:
-                db_connections[source] = sqlite3.connect(source)
+                db_connections[source] = sqlite3.connect(file_path(source, source.name))
             if destination_path not in db_connections:
-                db_connections[destination_path] = sqlite3.connect(destination_path)
+                db_connections[destination_path] = sqlite3.connect(database_path(destination_path, destination))
 
             try:
                 source_conn = db_connections[source]
@@ -146,23 +148,24 @@ class DatabaseTransfer(commands.Cog):
         embed = discord.Embed(title="Database Transfer (V2)", color=discord.Color.orange())
         message = await interaction.followup.send(embed=embed, ephemeral=True)
 
+        source_db_path = resolve_path("gift_db.sqlite")
         transfer_steps = [
-            ("gift_db.sqlite", "furnace_changes", "changes.sqlite"),
-            ("gift_db.sqlite", "nickname_changes", "changes.sqlite"),
-            ("gift_db.sqlite", "gift_codes", "giftcode.sqlite"),
-            ("gift_db.sqlite", "user_giftcodes", "giftcode.sqlite"),
-            ("gift_db.sqlite", "users", "users.sqlite")
+            (source_db_path, "furnace_changes", "changes.sqlite"),
+            (source_db_path, "nickname_changes", "changes.sqlite"),
+            (source_db_path, "gift_codes", "giftcode.sqlite"),
+            (source_db_path, "user_giftcodes", "giftcode.sqlite"),
+            (source_db_path, "users", "users.sqlite")
         ]
 
         db_connections = {}
         
         for source, table, destination in transfer_steps:
-            destination_path = f'db/{destination}'
+            destination_path = DB_DIR / destination
             
             if source not in db_connections:
-                db_connections[source] = sqlite3.connect(source)
+                db_connections[source] = sqlite3.connect(file_path(source, source.name))
             if destination_path not in db_connections:
-                db_connections[destination_path] = sqlite3.connect(destination_path)
+                db_connections[destination_path] = sqlite3.connect(database_path(destination_path, destination))
 
             try:
                 source_conn = db_connections[source]

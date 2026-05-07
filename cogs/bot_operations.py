@@ -7,6 +7,7 @@ import requests
 from .alliance_member_operations import AllianceSelectView
 from cogs.permissions import check_permission
 from cogs.permissions import BOT_OWNER_ID
+from paths import *
 
 VERSION_URL = "https://raw.githubusercontent.com/Reloisback/Whiteout-Survival-Discord-Bot/refs/heads/main/autoupdateinfo.txt"
 
@@ -15,9 +16,9 @@ class AdminPanel(commands.Cog):
     def __init__(self, bot, conn):
         self.bot = bot
         self.conn = conn
-        self.settings_db = sqlite3.connect('db/settings.sqlite', check_same_thread=False)
+        self.settings_db = sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite'), check_same_thread=False)
         self.settings_cursor = self.settings_db.cursor()
-        self.alliance_db = sqlite3.connect('db/alliance.sqlite', check_same_thread=False)
+        self.alliance_db = sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite'), check_same_thread=False)
         self.c_alliance = self.alliance_db.cursor()
 
     def __del__(self):
@@ -171,7 +172,7 @@ class AdminPanel(commands.Cog):
                     if line.startswith("- "):
                         update_notes.append(line)
 
-            with sqlite3.connect('db/settings.sqlite') as conn:
+            with sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite')) as conn:
                 cursor = conn.cursor()
 
                 for file_name, new_version in documents.items():
@@ -821,4 +822,4 @@ class AdminPanel(commands.Cog):
                     await interaction.response.send_message("❌ Main menu not found.", ephemeral=True)
 
 async def setup(bot):
-    await bot.add_cog(AdminPanel(bot, sqlite3.connect('db/settings.sqlite')))
+    await bot.add_cog(AdminPanel(bot, sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite'))))

@@ -8,6 +8,7 @@ from datetime import datetime
 import traceback
 import discord
 import ssl
+from paths import *
 
 class GiftCodeAPI:
     def __init__(self, bot):
@@ -20,13 +21,13 @@ class GiftCodeAPI:
             self.conn = bot.conn
             self.cursor = self.conn.cursor()
         else:
-            self.conn = sqlite3.connect('db/giftcode.sqlite')
+            self.conn = sqlite3.connect(database_path(GIFT_CODE_DB, 'giftcode.sqlite'))
             self.cursor = self.conn.cursor()
             
-        self.settings_conn = sqlite3.connect('db/settings.sqlite')
+        self.settings_conn = sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite'))
         self.settings_cursor = self.settings_conn.cursor()
         
-        self.users_conn = sqlite3.connect('db/users.sqlite')
+        self.users_conn = sqlite3.connect(database_path(USERS_DB, 'users.sqlite'))
         self.users_cursor = self.users_conn.cursor()
         
         self.ssl_context = ssl.create_default_context()

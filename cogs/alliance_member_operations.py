@@ -12,6 +12,7 @@ import os
 import ssl
 import traceback
 from cogs.permissions import check_permission, BOT_OWNER_ID
+from paths import *
 
 SECRET = 'tB87#kPtkxqOS2'
 
@@ -36,10 +37,10 @@ class PaginationView(discord.ui.View):
 class AllianceMemberOperations(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.conn_alliance = sqlite3.connect('db/alliance.sqlite')
+        self.conn_alliance = sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite'))
         self.c_alliance = self.conn_alliance.cursor()
         
-        self.conn_users = sqlite3.connect('db/users.sqlite')
+        self.conn_users = sqlite3.connect(database_path(USERS_DB, 'users.sqlite'))
         self.c_users = self.conn_users.cursor()
         self._ensure_users_table()
         
@@ -57,13 +58,16 @@ class AllianceMemberOperations(commands.Cog):
                 kid INTEGER,
                 stove_lv_content TEXT,
                 alliance TEXT,
-                discord_id INTEGER
+                discordid INTEGER
             )
         """)
         self.c_users.execute("PRAGMA table_info(users)")
         columns = [info[1] for info in self.c_users.fetchall()]
-        if "discord_id" not in columns:
-            self.c_users.execute("ALTER TABLE users ADD COLUMN discord_id INTEGER")
+        if "discordid" not in columns:
+            self.c_users.execute("ALTER TABLE users ADD COLUMN discordid INTEGER")
+            columns.append("discordid")
+        if "discord_id" in columns:
+            self.c_users.execute("UPDATE users SET discordid = discord_id WHERE discordid IS NULL")
         self.conn_users.commit()
 
     async def fetch_player_info(self, fid: int):
@@ -142,7 +146,7 @@ class AllianceMemberOperations(commands.Cog):
             alliances = self.c_alliance.fetchall()
         else:
             # Admins only see alliances assigned to them in admin_alliances
-            with sqlite3.connect('db/settings.sqlite') as sdb:
+            with sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite')) as sdb:
                 scursor = sdb.cursor()
                 scursor.execute("""
                     SELECT aa.alliance_id
@@ -260,7 +264,7 @@ class AllianceMemberOperations(commands.Cog):
         alliance_name = alliance[0] if alliance else f"Alliance {alliance_id}"
 
         self.c_users.execute("""
-            SELECT fid, nickname, furnace_lv, kid, discord_id, stove_lv_content
+            SELECT fid, nickname, furnace_lv, kid, discordid, stove_lv_content
             FROM users
             WHERE alliance = ?
             ORDER BY nickname COLLATE NOCASE
@@ -311,8 +315,15 @@ class AllianceMemberOperations(commands.Cog):
         stove_lv_content = player_data.get('stove_lv_content') or self.level_mapping.get(furnace_lv, str(furnace_lv))
 
         self.c_users.execute("""
-            INSERT OR REPLACE INTO users (fid, discord_id, nickname, furnace_lv, kid, stove_lv_content, alliance)
+            INSERT INTO users (fid, discordid, nickname, furnace_lv, kid, stove_lv_content, alliance)
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fid) DO UPDATE SET
+                discordid = excluded.discordid,
+                nickname = excluded.nickname,
+                furnace_lv = excluded.furnace_lv,
+                kid = excluded.kid,
+                stove_lv_content = excluded.stove_lv_content,
+                alliance = excluded.alliance
         """, (fid, discord_id, nickname, furnace_lv, kid, stove_lv_content, alliance_id))
         self.conn_users.commit()
 
@@ -431,7 +442,7 @@ class EditMemberModal(discord.ui.Modal, title="Edit Alliance Member"):
         new_discord_id = int(discord_id_value) if discord_id_value else None
         try:
             self.cog.c_users.execute(
-                "UPDATE users SET discord_id = ? WHERE fid = ?",
+                "UPDATE users SET discordid = ? WHERE fid = ?",
                 (new_discord_id, self.fid)
             )
             self.cog.conn_users.commit()

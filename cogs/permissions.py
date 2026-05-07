@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from paths import *
 
 import discord
 from discord import app_commands
@@ -20,7 +21,7 @@ class Permissions(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.conn = sqlite3.connect('db/settings.sqlite', check_same_thread=False)
+        self.conn = sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite'), check_same_thread=False)
         self.cursor = self.conn.cursor()
         self.setup_database()
 
@@ -250,7 +251,7 @@ def check_permission(user_id: int, guild_id: int | None, min_role: str) -> bool:
     if guild_id is None:
         return False
 
-    with sqlite3.connect('db/settings.sqlite') as conn:
+    with sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite')) as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT role FROM permissions WHERE guild_id = ? AND user_id = ?",

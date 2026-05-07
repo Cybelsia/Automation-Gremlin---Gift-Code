@@ -3,6 +3,7 @@ import sys
 import asyncio
 import signal
 import sqlite3
+from paths import *
 
 import discord
 from discord.ext import commands
@@ -14,17 +15,17 @@ def load_token() -> str:
     raise RuntimeError("DISCORD_TOKEN is missing in Railway variables.")
 
 def ensure_folders():
-    os.makedirs("cogs", exist_ok=True)
-    os.makedirs("db", exist_ok=True)
-    print("[INFO] Folders checked: cogs/, db/")
+    ensure_dir(COGS_DIR)
+    ensure_dir(DB_DIR)
+    print(f"[INFO] Folders checked: {COGS_DIR.resolve()}, {DB_DIR.resolve()}")
 
 def setup_database():
     databases = {
-        "alliance": "db/alliance.sqlite",
-        "giftcode": "db/giftcode.sqlite",
-        "changes": "db/changes.sqlite",
-        "users": "db/users.sqlite",
-        "settings": "db/settings.sqlite",
+        "alliance": database_path(ALLIANCE_DB, "alliance.sqlite"),
+        "giftcode": database_path(GIFT_CODE_DB, "giftcode.sqlite"),
+        "changes": database_path(CHANGES_DB, "changes.sqlite"),
+        "users": database_path(USERS_DB, "users.sqlite"),
+        "settings": database_path(SETTINGS_DB, "settings.sqlite"),
     }
 
     connections = {name: sqlite3.connect(path) for name, path in databases.items()}

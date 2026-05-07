@@ -6,6 +6,7 @@ import asyncio
 import traceback
 from datetime import datetime
 from cogs.permissions import check_permission
+from paths import *
 
 class Alliance(commands.Cog):
     def __init__(self, bot, conn):
@@ -13,13 +14,13 @@ class Alliance(commands.Cog):
         self.conn = conn
         self.c = self.conn.cursor()
         
-        self.conn_users = sqlite3.connect('db/users.sqlite')
+        self.conn_users = sqlite3.connect(database_path(USERS_DB, 'users.sqlite'))
         self.c_users = self.conn_users.cursor()
         
-        self.conn_settings = sqlite3.connect('db/settings.sqlite')
+        self.conn_settings = sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite'))
         self.c_settings = self.conn_settings.cursor()
         
-        self.conn_giftcode = sqlite3.connect('db/giftcode.sqlite')
+        self.conn_giftcode = sqlite3.connect(database_path(GIFT_CODE_DB, 'giftcode.sqlite'))
         self.c_giftcode = self.conn_giftcode.cursor()
 
         self._create_table()
@@ -703,5 +704,5 @@ class AllianceResultsChannelSetupView(discord.ui.View):
 
 
 async def setup(bot):
-    conn = sqlite3.connect('db/alliance.sqlite')
+    conn = sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite'))
     await bot.add_cog(Alliance(bot, conn))

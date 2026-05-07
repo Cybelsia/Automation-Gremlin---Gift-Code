@@ -7,11 +7,12 @@ import time
 import asyncio
 import sqlite3
 from datetime import datetime
+from paths import *
 
 class WCommand(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.conn = sqlite3.connect('db/changes.sqlite')
+        self.conn = sqlite3.connect(database_path(CHANGES_DB, 'changes.sqlite'))
         self.c = self.conn.cursor()
         self.SECRET = "tB87#kPtkxqOS2"
         
@@ -40,7 +41,7 @@ class WCommand(commands.Cog):
     @w.autocomplete('fid')
     async def autocomplete_fid(self, interaction: discord.Interaction, current: str):
         try:
-            with sqlite3.connect('db/users.sqlite') as users_db:
+            with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_db:
                 cursor = users_db.cursor()
                 cursor.execute("SELECT fid, nickname FROM users")
                 users = cursor.fetchall()
@@ -104,13 +105,13 @@ class WCommand(commands.Cog):
                             user_info = None
                             alliance_info = None
                             
-                            with sqlite3.connect('db/users.sqlite') as users_db:
+                            with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_db:
                                 cursor = users_db.cursor()
                                 cursor.execute("SELECT *, alliance FROM users WHERE fid=?", (fid_value,))
                                 user_info = cursor.fetchone()
                                 
                                 if user_info and user_info[-1]:
-                                    with sqlite3.connect('db/alliance.sqlite') as alliance_db:
+                                    with sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite')) as alliance_db:
                                         cursor = alliance_db.cursor()
                                         cursor.execute("SELECT name FROM alliance_list WHERE alliance_id=?", (user_info[-1],))
                                         alliance_info = cursor.fetchone()

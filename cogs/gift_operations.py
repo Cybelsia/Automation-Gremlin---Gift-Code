@@ -18,6 +18,7 @@ import os
 import traceback
 from .gift_operationsapi import GiftCodeAPI
 from cogs.permissions import check_permission
+from paths import *
 
 class GiftOperations(commands.Cog):
     def __init__(self, bot):
@@ -26,7 +27,7 @@ class GiftOperations(commands.Cog):
             self.conn = bot.conn
             self.cursor = self.conn.cursor()
         else:
-            self.conn = sqlite3.connect('db/giftcode.sqlite')
+            self.conn = sqlite3.connect(database_path(GIFT_CODE_DB, 'giftcode.sqlite'))
             self.cursor = self.conn.cursor()
             
         self.api = GiftCodeAPI(bot)
@@ -39,13 +40,13 @@ class GiftOperations(commands.Cog):
         """)
         self.conn.commit()
         
-        self.settings_conn = sqlite3.connect('db/settings.sqlite')
+        self.settings_conn = sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite'))
         self.settings_cursor = self.settings_conn.cursor()
         
-        self.alliance_conn = sqlite3.connect('db/alliance.sqlite')
+        self.alliance_conn = sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite'))
         self.alliance_cursor = self.alliance_conn.cursor()
 
-        self.gift_operations_conn = sqlite3.connect('db/gift_operations.sqlite')
+        self.gift_operations_conn = sqlite3.connect(database_path(GIFT_OPERATIONS_DB, 'gift_operations.sqlite'))
         self.gift_operations_cursor = self.gift_operations_conn.cursor()
         self.gift_operations_cursor.execute("""
             CREATE TABLE IF NOT EXISTS auto_gift_settings (
@@ -108,7 +109,7 @@ class GiftOperations(commands.Cog):
             allowed_methods=["POST"]
         )
 
-        self.log_directory = 'log'
+        self.log_directory = str(LOG_DIR)
         if not os.path.exists(self.log_directory):
             os.makedirs(self.log_directory)
 
@@ -228,7 +229,7 @@ class GiftOperations(commands.Cog):
                     continue
 
                 # Redeem only for this specific alliance
-                with sqlite3.connect('db/users.sqlite') as users_conn:
+                with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
                     users_cursor = users_conn.cursor()
                     users_cursor.execute("SELECT fid FROM users WHERE alliance = ?", (alliance_id,))
                     members = users_cursor.fetchall()
@@ -292,7 +293,7 @@ class GiftOperations(commands.Cog):
         await self.bot.wait_until_ready()
 
     def upsert_scanned_member(self, fid, nickname, furnace_lv, kid, stove_lv_content, alliance_id):
-        with sqlite3.connect('db/users.sqlite') as users_conn:
+        with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
             users_conn.execute(
                 """
                 INSERT INTO users (fid, nickname, furnace_lv, kid, stove_lv_content, alliance)
@@ -333,7 +334,7 @@ class GiftOperations(commands.Cog):
                     print(f"[{label.upper()} SCAN] Results channel {results_channel_id} not found for alliance {alliance_id}, skipping")
                     continue
 
-                with sqlite3.connect('db/users.sqlite') as users_conn:
+                with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
                     users_cursor = users_conn.cursor()
                     users_cursor.execute(
                         "SELECT fid, nickname, furnace_lv, kid, stove_lv_content FROM users WHERE alliance = ?",
@@ -670,7 +671,7 @@ class GiftOperations(commands.Cog):
         for gift_code in gift_codes:
             processed_codes += 1
             for alliance_id, alliance_name in alliances:
-                with sqlite3.connect('db/users.sqlite') as users_conn:
+                with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
                     users_cursor = users_conn.cursor()
                     users_cursor.execute("SELECT fid FROM users WHERE alliance = ?", (alliance_id,))
                     members = users_cursor.fetchall()
@@ -936,7 +937,7 @@ class GiftOperations(commands.Cog):
             await interaction.followup.send("❌ This can only be used in a server.", ephemeral=True)
             return
 
-        with sqlite3.connect('db/users.sqlite') as users_conn:
+        with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
             users_cursor = users_conn.cursor()
             users_cursor.execute("SELECT fid FROM users WHERE alliance = ?", (alliance_id,))
             members = users_cursor.fetchall()

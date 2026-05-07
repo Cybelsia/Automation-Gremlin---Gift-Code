@@ -10,6 +10,7 @@ from datetime import datetime
 from colorama import Fore, Style
 import os
 from aiohttp_socks import ProxyConnector
+from paths import *
 
 SECRET = 'tB87#kPtkxqOS2'
 
@@ -21,14 +22,14 @@ level_mapping = {
 class Control(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.conn_alliance = sqlite3.connect('db/alliance.sqlite')
-        self.conn_users = sqlite3.connect('db/users.sqlite')
-        self.conn_changes = sqlite3.connect('db/changes.sqlite')
+        self.conn_alliance = sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite'))
+        self.conn_users = sqlite3.connect(database_path(USERS_DB, 'users.sqlite'))
+        self.conn_changes = sqlite3.connect(database_path(CHANGES_DB, 'changes.sqlite'))
         self.cursor_alliance = self.conn_alliance.cursor()
         self.cursor_users = self.conn_users.cursor()
         self.cursor_changes = self.conn_changes.cursor()
         
-        self.conn_settings = sqlite3.connect('db/settings.sqlite')
+        self.conn_settings = sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite'))
         self.cursor_settings = self.conn_settings.cursor()
         self.db_lock = asyncio.Lock()
         self.control_queue = asyncio.Queue()

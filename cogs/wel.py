@@ -3,11 +3,12 @@ from discord.ext import commands
 from discord import app_commands
 import sqlite3
 from .permissions import BOT_OWNER_ID
+from paths import *
 
 class GNCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.conn = sqlite3.connect('db/settings.sqlite')
+        self.conn = sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite'))
         self.c = self.conn.cursor()
         self.c.execute("CREATE TABLE IF NOT EXISTS auto (value INTEGER NOT NULL DEFAULT 1)")
         self.c.execute("INSERT INTO auto (value) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM auto)")
@@ -45,7 +46,7 @@ class GNCommands(commands.Cog):
 
                 await admin_user.send(embed=status_embed)
 
-                with sqlite3.connect('db/alliance.sqlite') as alliance_db:
+                with sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite')) as alliance_db:
                     cursor = alliance_db.cursor()
                     cursor.execute("SELECT alliance_id, name FROM alliance_list")
                     alliances = cursor.fetchall()
@@ -56,13 +57,13 @@ class GNCommands(commands.Cog):
                     for alliance_id, name in alliances:
                         info_parts = []
 
-                        with sqlite3.connect('db/users.sqlite') as users_db:
+                        with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_db:
                             cursor = users_db.cursor()
                             cursor.execute("SELECT COUNT(*) FROM users WHERE alliance = ?", (alliance_id,))
                             user_count = cursor.fetchone()[0]
                             info_parts.append(f"👥 Members: {user_count}")
 
-                        with sqlite3.connect('db/alliance.sqlite') as alliance_db:
+                        with sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite')) as alliance_db:
                             cursor = alliance_db.cursor()
                             cursor.execute("SELECT discord_server_id FROM alliance_list WHERE alliance_id = ?", (alliance_id,))
                             discord_server = cursor.fetchone()
@@ -77,7 +78,7 @@ class GNCommands(commands.Cog):
                                 interval_text = f"⏱️ Auto Check: {settings[1]} minutes" if settings[1] > 0 else "⏱️ No Auto Check"
                                 info_parts.append(interval_text)
 
-                        with sqlite3.connect('db/giftcode.sqlite') as gift_db:
+                        with sqlite3.connect(database_path(GIFT_CODE_DB, 'giftcode.sqlite')) as gift_db:
                             cursor = gift_db.cursor()
                             cursor.execute("SELECT status FROM giftcodecontrol WHERE alliance_id = ?", (alliance_id,))
                             gift_status = cursor.fetchone()

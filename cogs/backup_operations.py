@@ -13,20 +13,20 @@ import shutil
 import traceback
 import ssl
 from cogs.permissions import check_permission, BOT_OWNER_ID
+from paths import *
 
 class BackupOperations(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.db_path = "db/backup.sqlite"
+        self.db_path = database_path(BACKUP_DB, "backup.sqlite")
         self.api_url = "https://wosland.com/apidc/backup_api/backup_api.php"
         self.api_key = "serioyun_backup_api_key_2024"
-        self.log_path = "log/backuplog.txt"
-        os.makedirs("log", exist_ok=True)
+        self.log_path = file_path(BACKUP_LOG, "backuplog.txt")
+        ensure_dir(LOG_DIR)
         self.setup_database()
         self.automatic_backup_loop.start()
 
     def setup_database(self):
-        os.makedirs("db", exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -53,7 +53,7 @@ class BackupOperations(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def create_alliance_backup_zip(self, alliance_id: int, guild_id: int):
-        with sqlite3.connect("db/alliance.sqlite") as adb:
+        with sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite')) as adb:
             adb.row_factory = sqlite3.Row
             acursor = adb.cursor()
             acursor.execute("""
@@ -66,7 +66,7 @@ class BackupOperations(commands.Cog):
         if not alliance_row:
             raise ValueError("Alliance not found.")
 
-        with sqlite3.connect("db/users.sqlite") as udb:
+        with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as udb:
             udb.row_factory = sqlite3.Row
             ucursor = udb.cursor()
             ucursor.execute("""
@@ -132,7 +132,7 @@ async def get_available_alliances(user_id: int, guild_id: int):
     is_admin = check_permission(user_id, guild_id, "admin")
     is_owner = (user_id == BOT_OWNER_ID)
 
-    with sqlite3.connect("db/alliance.sqlite") as adb:
+    with sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite')) as adb:
         acursor = adb.cursor()
 
         if is_owner or not is_admin:
@@ -144,7 +144,7 @@ async def get_available_alliances(user_id: int, guild_id: int):
             """, (guild_id,))
             alliances = acursor.fetchall()
         else:
-            with sqlite3.connect("db/settings.sqlite") as sdb:
+            with sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite')) as sdb:
                 scursor = sdb.cursor()
                 scursor.execute("""
                     SELECT alliance_id
@@ -172,7 +172,7 @@ async def get_available_alliances(user_id: int, guild_id: int):
                 alliances = acursor.fetchall()
 
     results = []
-    with sqlite3.connect("db/users.sqlite") as udb:
+    with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as udb:
         ucursor = udb.cursor()
         for alliance_id, name in alliances:
             ucursor.execute("SELECT COUNT(*) FROM users WHERE alliance = ?", (alliance_id,))

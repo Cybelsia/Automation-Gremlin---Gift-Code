@@ -3,13 +3,14 @@ from discord.ext import commands
 import sqlite3
 from datetime import datetime
 from .alliance_member_operations import AllianceSelectView
+from paths import *
 
 class Changes(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.conn_settings = sqlite3.connect('db/settings.sqlite')
+        self.conn_settings = sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite'))
         self.c_settings = self.conn_settings.cursor()
-        self.conn = sqlite3.connect('db/changes.sqlite')
+        self.conn = sqlite3.connect(database_path(CHANGES_DB, 'changes.sqlite'))
         self.cursor = self.conn.cursor()
         self._create_tables()
         

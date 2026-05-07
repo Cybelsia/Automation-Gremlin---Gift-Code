@@ -8,12 +8,12 @@ import asyncio
 import json
 import urllib.parse
 import traceback
+from paths import *
 
 class BearTrap(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.db_path = 'db/beartime.sqlite'
-        os.makedirs('db', exist_ok=True)
+        self.db_path = database_path(BEAR_TRAP_DB, "beartime.sqlite")
         self.conn = sqlite3.connect(self.db_path)
         self.cursor = self.conn.cursor()
 

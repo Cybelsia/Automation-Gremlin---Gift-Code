@@ -8,13 +8,14 @@ import ssl
 import traceback
 from datetime import datetime
 from cogs.permissions import check_permission
+from paths import *
 
 class OtherFeatures(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
     def upsert_api_pull_member(self, fid, nickname, furnace_lv, kid, stove_lv_content, alliance_id):
-        with sqlite3.connect('db/users.sqlite') as users_conn:
+        with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
             users_conn.execute(
                 """
                 UPDATE users
@@ -90,7 +91,7 @@ class OtherFeatures(commands.Cog):
                 await interaction.followup.send("❌ Gift Operations module not found.", ephemeral=True)
                 return
 
-            with sqlite3.connect('db/users.sqlite') as users_conn:
+            with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
                 users_cursor = users_conn.cursor()
                 users_cursor.execute(
                     "SELECT fid, nickname, furnace_lv, kid, stove_lv_content FROM users WHERE alliance = ?",

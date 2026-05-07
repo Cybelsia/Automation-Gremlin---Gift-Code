@@ -5,14 +5,15 @@ from datetime import datetime
 from .alliance_member_operations import AllianceSelectView
 from .alliance import PaginatedChannelView
 from cogs.permissions import check_permission
+from paths import *
 
 class LogSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.settings_db = sqlite3.connect('db/settings.sqlite', check_same_thread=False)
+        self.settings_db = sqlite3.connect(database_path(SETTINGS_DB, 'settings.sqlite'), check_same_thread=False)
         self.settings_cursor = self.settings_db.cursor()
         
-        self.alliance_db = sqlite3.connect('db/alliance.sqlite', check_same_thread=False)
+        self.alliance_db = sqlite3.connect(database_path(ALLIANCE_DB, 'alliance.sqlite'), check_same_thread=False)
         self.alliance_cursor = self.alliance_db.cursor()
         
         self.setup_database()
@@ -153,7 +154,7 @@ class LogSystem(commands.Cog):
 
                 alliances_with_counts = []
                 for alliance_id, name in alliances:
-                    with sqlite3.connect('db/users.sqlite') as users_db:
+                    with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_db:
                         cursor = users_db.cursor()
                         cursor.execute("SELECT COUNT(*) FROM users WHERE alliance = ?", (alliance_id,))
                         member_count = cursor.fetchone()[0]
@@ -292,7 +293,7 @@ class LogSystem(commands.Cog):
                     alliance_result = self.alliance_cursor.fetchone()
                     alliance_name = alliance_result[0] if alliance_result else "Unknown Alliance"
 
-                    with sqlite3.connect('db/users.sqlite') as users_db:
+                    with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_db:
                         cursor = users_db.cursor()
                         cursor.execute("SELECT COUNT(*) FROM users WHERE alliance = ?", (alliance_id,))
                         member_count = cursor.fetchone()[0]
