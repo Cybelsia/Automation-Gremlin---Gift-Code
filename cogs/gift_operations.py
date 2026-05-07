@@ -329,7 +329,7 @@ class GiftOperations(commands.Cog):
                             failed_request_attempts += details.get("request_attempts", 1)
                             details.update({
                                 "job_type": "scheduled",
-                                "final_state": "member_failed",
+                                "final_state": "job_failed_final" if status in ("code_invalid", "code_rate_limited") else "member_failed",
                                 "status": status,
                                 "alliance_id": alliance_id,
                                 "alliance_name": name,
@@ -339,6 +339,10 @@ class GiftOperations(commands.Cog):
                             failure_details.append(details)
                             print(f"[SCHEDULER-REDEEM-FAIL] {json.dumps(details, ensure_ascii=False)}")
                             await self.send_redemption_failure_summary(guild, results_channel, details)
+                            if status in ("code_invalid", "code_rate_limited"):
+                                print(f"[SCHEDULER-REDEEM] code={gift_code} status={status} action=stop_member_fanout")
+                                await asyncio.sleep(1)
+                                break
                         await asyncio.sleep(1)
 
                 embed = discord.Embed(
@@ -1004,7 +1008,13 @@ class GiftOperations(commands.Cog):
                                 api_response_body=response_text,
                             )
                         failure_reason = self.get_gift_code_failure_reason(data)
+                        failure_status = self.classify_redemption_status({
+                            "api_status_code": response.status,
+                            "error_reason": failure_reason,
+                            "api_response_body": response_text,
+                        })
                         last_result.update({
+                            "status": failure_status,
                             "final_error_reason": failure_reason,
                             "error_reason": failure_reason,
                             "exception_message": data.get("msg"),
