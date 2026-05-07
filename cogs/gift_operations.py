@@ -13,6 +13,7 @@ from discord.ext import tasks
 import asyncio
 import random
 import re
+from urllib.parse import parse_qsl
 from .alliance_member_operations import AllianceSelectView
 from .alliance import PaginatedChannelView
 import os
@@ -941,6 +942,8 @@ class GiftOperations(commands.Cog):
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
 
+        self.log_redemption_request_shape(gift_code, fid, self.wos_giftcode_url, form_data, headers)
+
         return await self.request_redemption_with_backoff(
             fid=fid,
             gift_code=gift_code,
@@ -955,10 +958,10 @@ class GiftOperations(commands.Cog):
             last_result = None
             for attempt in range(1, self.redemption_max_attempts + 1):
                 try:
-                    print(f"[WOS-REDEEM-REQUEST] function=request_redemption_with_backoff fid={fid} code={gift_code} attempt={attempt} form={form_data}")
+                    print(f"[WOS-REDEEM-REQUEST] function=request_redemption_with_backoff fid={fid} code={gift_code} attempt={attempt}")
                     async with session.post(self.wos_giftcode_url, headers=headers, data=form_data) as response:
                         response_text = await response.text()
-                        print(f"[WOS-REDEEM-RESPONSE] function=request_redemption_with_backoff fid={fid} code={gift_code} attempt={attempt} status={response.status} body={response_text}")
+                        self.log_redemption_response_shape(gift_code, fid, attempt, response.status, response_text)
                         last_result = self.build_redemption_result(
                             fid=fid,
                             gift_code=gift_code,
@@ -1096,6 +1099,24 @@ class GiftOperations(commands.Cog):
 
     def log_redemption_retry(self, gift_code: str, fid: int, attempt: int, delay: float, reason: str):
         print(f"[WOS-REDEEM-RETRY] function=request_redemption_with_backoff code={gift_code} fid={fid} attempt={attempt} delay={delay:.2f}s reason={reason}")
+
+    def log_redemption_request_shape(self, gift_code: str, fid: int, endpoint: str, form_data: str, headers: dict):
+        body_fields = dict(parse_qsl(form_data, keep_blank_values=True))
+        body_types = {key: type(value).__name__ for key, value in body_fields.items()}
+        header_keys = sorted(headers.keys())
+        print(
+            "[WOS-REDEEM-SHAPE] "
+            f"code={gift_code} fid={fid} endpoint={endpoint} "
+            f"query_keys=[] body_keys={sorted(body_fields.keys())} "
+            f"body_value_types={body_types} header_keys={header_keys}"
+        )
+
+    def log_redemption_response_shape(self, gift_code: str, fid: int, attempt: int, response_status: int, response_body: str):
+        print(
+            "[WOS-REDEEM-RESPONSE] "
+            f"function=request_redemption_with_backoff fid={fid} code={gift_code} "
+            f"attempt={attempt} status={response_status} body={response_body}"
+        )
 
     def get_redemption_retry_delay(self, response, attempt: int):
         if response is not None:
