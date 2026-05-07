@@ -925,10 +925,11 @@ class GiftOperations(commands.Cog):
         )
 
     async def redeem_gift_code_for_fid(self, fid: int, gift_code: str):
-        time_val = int(datetime.now().timestamp())
-        form = f"cdk={gift_code}&fid={fid}&time={time_val}"
+        time_val = str(int(datetime.now().timestamp()))
+        fid_value = str(fid)
+        form = f"cdk={gift_code}&fid={fid_value}&time={time_val}"
         sign = hashlib.md5((form + self.wos_encrypt_key).encode('utf-8')).hexdigest()
-        form_data = f"cdk={gift_code}&fid={fid}&sign={sign}&time={time_val}"
+        form_data = {"cdk": gift_code, "fid": fid_value, "sign": sign, "time": time_val}
         redemption_id = f"{gift_code}:{fid}:{time_val}"
         headers = {
             "accept": "application/json, text/plain, */*",
@@ -953,7 +954,7 @@ class GiftOperations(commands.Cog):
             redemption_id=redemption_id,
         )
 
-    async def request_redemption_with_backoff(self, fid: int, gift_code: str, form_data: str, headers: dict, ssl_context, redemption_id: str):
+    async def request_redemption_with_backoff(self, fid: int, gift_code: str, form_data: dict, headers: dict, ssl_context, redemption_id: str):
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
             last_result = None
             for attempt in range(1, self.redemption_max_attempts + 1):
@@ -1100,8 +1101,8 @@ class GiftOperations(commands.Cog):
     def log_redemption_retry(self, gift_code: str, fid: int, attempt: int, delay: float, reason: str):
         print(f"[WOS-REDEEM-RETRY] function=request_redemption_with_backoff code={gift_code} fid={fid} attempt={attempt} delay={delay:.2f}s reason={reason}")
 
-    def log_redemption_request_shape(self, gift_code: str, fid: int, endpoint: str, form_data: str, headers: dict):
-        body_fields = dict(parse_qsl(form_data, keep_blank_values=True))
+    def log_redemption_request_shape(self, gift_code: str, fid: int, endpoint: str, form_data, headers: dict):
+        body_fields = dict(form_data) if isinstance(form_data, dict) else dict(parse_qsl(form_data, keep_blank_values=True))
         body_types = {key: type(value).__name__ for key, value in body_fields.items()}
         header_keys = sorted(headers.keys())
         print(
