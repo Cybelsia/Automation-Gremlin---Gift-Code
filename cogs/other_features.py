@@ -182,6 +182,9 @@ class OtherFeatures(commands.Cog):
                     "🌐 **API Pull Alliance Members**\n"
                     "└ Refresh stored members for one alliance\n"
                     "└ Updates current API details in users table\n\n"
+                    "🧪 **Redeem Diagnostics**\n"
+                    "└ Manual admin test for gift code redemption\n"
+                    "└ Run a one-off FID + code check\n\n"
                     "━━━━━━━━━━━━━━━━━━━━━━"
                 ),
                 color=discord.Color.blue()
@@ -283,6 +286,23 @@ class OtherFeaturesView(discord.ui.View):
     )
     async def api_pull_alliance_members_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_api_pull_alliance_select(interaction)
+
+    @discord.ui.button(
+        label="Redeem Diagnostics",
+        emoji="🧪",
+        style=discord.ButtonStyle.primary,
+        custom_id="redeem_diagnostics",
+        row=2
+    )
+    async def redeem_diagnostics_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ Only admins can use Redeem Diagnostics.", ephemeral=True)
+            return
+        gift_cog = self.cog.bot.get_cog("GiftOperations")
+        if not gift_cog:
+            await interaction.response.send_message("❌ Gift Operations module not found.", ephemeral=True)
+            return
+        await gift_cog.show_redeem_diagnostics_menu(interaction)
 
     @discord.ui.button(
         label="Main Menu",

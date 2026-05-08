@@ -192,7 +192,7 @@ class Alliance(commands.Cog):
             description="Choose what you want to update.",
             color=discord.Color.blue()
         )
-        embed.add_field(name="Refresh Rate", value=f"`{refresh_rate}` seconds" if refresh_rate else "`Not set`", inline=False)
+        embed.add_field(name="Scheduled Redemption Interval", value=f"`{refresh_rate}` seconds" if refresh_rate else "`Not set`", inline=False)
         embed.add_field(name="Gift Code Channel", value=gift_ch, inline=False)
         embed.add_field(name="Results Channel", value=results_ch, inline=False)
         await interaction.response.edit_message(
@@ -413,7 +413,11 @@ class EditAllianceMenuView(discord.ui.View):
 
 class EditAllianceModal(discord.ui.Modal, title="Edit Alliance"):
     alliance_name = discord.ui.TextInput(label="Alliance Name", placeholder="Enter new name", max_length=100)
-    refresh_rate = discord.ui.TextInput(label="Refresh Rate (seconds)", placeholder="e.g. 3600", max_length=20)
+    refresh_rate = discord.ui.TextInput(
+        label="Scheduled Redemption Interval (seconds)",
+        placeholder="21600, 43200, 86400, 172800, 259200, or 604800",
+        max_length=20
+    )
 
     def __init__(self, cog, alliance_id: int, current_name: str, current_refresh_rate):
         super().__init__()
@@ -429,7 +433,10 @@ class EditAllianceModal(discord.ui.Modal, title="Edit Alliance"):
             await interaction.response.send_message("❌ Alliance name is required.", ephemeral=True)
             return
         if not refresh_rate_value.isdigit() or int(refresh_rate_value) <= 0:
-            await interaction.response.send_message("❌ Refresh rate must be a positive number of seconds.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Interval must be a positive number of seconds. Use one of: 21600, 43200, 86400, 172800, 259200, 604800.",
+                ephemeral=True
+            )
             return
         try:
             self.cog.c.execute(
@@ -442,7 +449,7 @@ class EditAllianceModal(discord.ui.Modal, title="Edit Alliance"):
                 color=discord.Color.green()
             )
             embed.add_field(name="Name", value=f"`{name}`", inline=False)
-            embed.add_field(name="Refresh Rate", value=f"`{refresh_rate_value}` seconds", inline=False)
+            embed.add_field(name="Scheduled Redemption Interval", value=f"`{refresh_rate_value}` seconds", inline=False)
             await interaction.response.send_message(embed=embed, ephemeral=True)
         except sqlite3.IntegrityError:
             await interaction.response.send_message("❌ An alliance with that name already exists.", ephemeral=True)

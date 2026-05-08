@@ -3,6 +3,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import ssl
 import time
 from pathlib import Path
@@ -19,6 +20,8 @@ PLAYER_URL = f"{API_BASE_URL}/player"
 CAPTCHA_URL = f"{API_BASE_URL}/captcha"
 GIFT_CODE_URL = f"{API_BASE_URL}/gift_code"
 CAPTCHA_OUTPUT_DIR = Path("captcha_debug")
+TWOCAPTCHA_SUBMIT_URL = "https://2captcha.com/in.php"
+TWOCAPTCHA_RESULT_URL = "https://2captcha.com/res.php"
 
 
 def md5_sign(sign_input):
@@ -155,6 +158,17 @@ def summarize_captcha_data(data):
     }
 
 
+def extract_captcha_image_base64(data):
+    if not isinstance(data, dict) or not isinstance(data.get("data"), dict):
+        return None
+    image_data = data["data"].get("img")
+    if not isinstance(image_data, str):
+        return None
+    if "," in image_data and "base64" in image_data[:50]:
+        return image_data.split(",", 1)[1]
+    return image_data
+
+
 def save_possible_captcha_image(data):
     if not isinstance(data, dict):
         return None
@@ -181,6 +195,72 @@ def save_possible_captcha_image(data):
         output_path.write_bytes(decoded)
         return str(output_path)
     return None
+
+
+async def solve_captcha_with_2captcha(session, api_key, captcha_base64, poll_interval, max_wait):
+    if not api_key:
+        return None, {"solver": "2captcha", "used": False, "reason": "missing_api_key"}
+    if not captcha_base64:
+        return None, {"solver": "2captcha", "used": False, "reason": "missing_captcha_image"}
+
+    submit_payload = {
+        "key": api_key,
+        "method": "base64",
+        "body": captcha_base64,
+        "json": 1,
+    }
+    async with session.post(TWOCAPTCHA_SUBMIT_URL, data=submit_payload) as response:
+        submit_text = await response.text()
+
+    try:
+        submit_data = json.loads(submit_text)
+    except json.JSONDecodeError:
+        return None, {"solver": "2captcha", "used": True, "stage": "submit", "reason": "invalid_json"}
+
+    if submit_data.get("status") != 1:
+        return None, {
+            "solver": "2captcha",
+            "used": True,
+            "stage": "submit",
+            "status": submit_data.get("status"),
+            "request": submit_data.get("request"),
+        }
+
+    captcha_id = submit_data.get("request")
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        await asyncio.sleep(poll_interval)
+        result_params = {
+            "key": api_key,
+            "action": "get",
+            "id": captcha_id,
+            "json": 1,
+        }
+        async with session.get(TWOCAPTCHA_RESULT_URL, params=result_params) as response:
+            result_text = await response.text()
+        try:
+            result_data = json.loads(result_text)
+        except json.JSONDecodeError:
+            return None, {"solver": "2captcha", "used": True, "stage": "poll", "reason": "invalid_json"}
+
+        if result_data.get("status") == 1:
+            return result_data.get("request"), {
+                "solver": "2captcha",
+                "used": True,
+                "stage": "poll",
+                "status": result_data.get("status"),
+                "captcha_id_present": bool(captcha_id),
+            }
+        if result_data.get("request") != "CAPCHA_NOT_READY":
+            return None, {
+                "solver": "2captcha",
+                "used": True,
+                "stage": "poll",
+                "status": result_data.get("status"),
+                "request": result_data.get("request"),
+            }
+
+    return None, {"solver": "2captcha", "used": True, "stage": "poll", "reason": "timeout"}
 
 
 async def post_form(session, url, payload):
@@ -218,10 +298,13 @@ async def main():
     parser.add_argument("--captcha-method", choices=["get", "post_empty", "post_fid", "post_fid_signed"], default="get")
     parser.add_argument("--submit-final", action="store_true", help="Allow one final /api/gift_code submission after manual captcha input")
     parser.add_argument("--print-gift-sign-candidates", action="store_true")
-    parser.add_argument("--gift-sign-mode", choices=["legacy", "include_captcha_last", "captcha_first"], default="legacy")
+    parser.add_argument("--gift-sign-mode", choices=["legacy", "include_captcha_last", "captcha_first"], default="captcha_first")
     parser.add_argument("--captcha-field", default="captcha_code", help="Field name to send the manual captcha solution under")
     parser.add_argument("--captcha-token-field", default=None, help="Optional token/id field name to include in gift submission")
     parser.add_argument("--captcha-token-value", default=None, help="Optional token/id value to include in gift submission")
+    parser.add_argument("--2captcha-api-key", dest="twocaptcha_api_key", default=os.getenv("TWOCAPTCHA_API_KEY"))
+    parser.add_argument("--2captcha-poll-interval", dest="twocaptcha_poll_interval", type=float, default=5.0)
+    parser.add_argument("--2captcha-max-wait", dest="twocaptcha_max_wait", type=float, default=120.0)
     args = parser.parse_args()
 
     ssl_context = ssl.create_default_context()
@@ -269,7 +352,22 @@ async def main():
             print_json("FINAL_SUBMISSION", {"skipped": True, "reason": "--submit-final not provided"})
             return
 
-        captcha_solution = input(f"Enter manual captcha solution for field '{args.captcha_field}': ").strip()
+        captcha_solution = None
+        captcha_base64 = extract_captcha_image_base64(captcha_data)
+        if args.twocaptcha_api_key:
+            captcha_solution, solver_summary = await solve_captcha_with_2captcha(
+                session,
+                args.twocaptcha_api_key,
+                captcha_base64,
+                args.twocaptcha_poll_interval,
+                args.twocaptcha_max_wait,
+            )
+            print_json("CAPTCHA_SOLVER", solver_summary)
+
+        if not captcha_solution:
+            print_json("CAPTCHA_SOLVER", {"solver": "manual", "used": True, "reason": "fallback"})
+            captcha_solution = input(f"Enter manual captcha solution for field '{args.captcha_field}': ").strip()
+
         if not captcha_solution:
             print_json("FINAL_SUBMISSION", {"skipped": True, "reason": "empty captcha solution"})
             return
