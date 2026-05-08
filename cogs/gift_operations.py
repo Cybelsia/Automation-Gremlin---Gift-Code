@@ -204,6 +204,8 @@ class GiftOperations(commands.Cog):
         reason = str(details.get("error_reason") or "").lower()
         response_body = str(details.get("api_response_body") or "").lower()
         combined = f"{reason} {response_body}"
+        if '"err_code":40008' in response_body or '"msg":"received."' in response_body or "received." in combined:
+            return "code_not_claimable"
         if "captcha_solver_failed" in combined or "captcha solver" in combined:
             return "captcha_solver_failed"
         if api_status_code == 429 or "rate limit" in combined or "too many" in combined:
@@ -213,7 +215,7 @@ class GiftOperations(commands.Cog):
         return "member_failed"
 
     def is_code_terminal_status(self, status: str):
-        return status in ("code_invalid", "code_rate_limited", "captcha_solver_failed")
+        return status in ("code_invalid", "code_rate_limited", "captcha_solver_failed", "code_not_claimable")
 
     def has_terminal_code_failure(self, gift_code: str, alliance_id: int, guild_id: int):
         self.gift_operations_cursor.execute(
@@ -223,7 +225,7 @@ class GiftOperations(commands.Cog):
             WHERE gift_code = ?
               AND alliance_id = ?
               AND guild_id = ?
-              AND status IN ('code_invalid', 'code_rate_limited', 'captcha_solver_failed')
+              AND status IN ('code_invalid', 'code_rate_limited', 'captcha_solver_failed', 'code_not_claimable')
             LIMIT 1
             """,
             (gift_code, alliance_id, guild_id)
@@ -277,10 +279,12 @@ class GiftOperations(commands.Cog):
                 print(f"[SCHEDULER] Scanning alliance_id={alliance_id} name={name} channel={gift_channel_id}")
 
                 found_codes = []
-                async for message in gift_channel.history(limit=5):
+                async for message in gift_channel.history(limit=200):
                     code = self.extract_auto_gift_code(message.content)
                     if code and code not in found_codes:
                         found_codes.append(code)
+                        if len(found_codes) >= 5:
+                            break
 
                 if not found_codes:
                     print(f"[SCHEDULER] No codes found for alliance_id={alliance_id}")
@@ -301,11 +305,21 @@ class GiftOperations(commands.Cog):
                 failed_request_attempts = 0
                 final_failed_jobs = 0
                 failure_details = []
+                skipped_codes = 0
+                skipped_code_details = []
+                already_redeemed_members = 0
+                processed_pairs = set()
                 for gift_code in found_codes:
                     if self.has_terminal_code_failure(gift_code, alliance_id, guild_id):
+                        skipped_codes += 1
+                        skipped_code_details.append(gift_code)
                         print(f"[SCHEDULER-SKIP] code={gift_code} alliance_id={alliance_id} reason=terminal_code_failure")
                         continue
                     first_fid = members[0][0]
+                    if (gift_code, first_fid) in processed_pairs:
+                        print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=skipped_duplicate_pair")
+                        continue
+                    processed_pairs.add((gift_code, first_fid))
                     print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=starting")
                     ok, result = await self.redeem_gift_code_for_fid(first_fid, gift_code)
                     if ok:
@@ -322,6 +336,8 @@ class GiftOperations(commands.Cog):
                             "timestamp": datetime.utcnow().isoformat()
                         }
                         status = self.classify_redemption_status(details)
+                        if status == "code_not_claimable":
+                            already_redeemed_members += 1
                         details.update({
                             "job_type": "scheduled",
                             "final_state": "job_failed_final" if self.is_code_terminal_status(status) else "member_failed",
@@ -343,6 +359,10 @@ class GiftOperations(commands.Cog):
                         member_iterable = members[1:]
 
                     for (fid,) in member_iterable:
+                        if (gift_code, fid) in processed_pairs:
+                            print(f"[SCHEDULER-REDEEM] code={gift_code} fid={fid} status=skipped_duplicate_pair")
+                            continue
+                        processed_pairs.add((gift_code, fid))
                         ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
                         if ok:
                             total_success += 1
@@ -357,6 +377,8 @@ class GiftOperations(commands.Cog):
                                 "timestamp": datetime.utcnow().isoformat()
                             }
                             status = self.classify_redemption_status(details)
+                            if status == "code_not_claimable":
+                                already_redeemed_members += 1
                             failed_request_attempts += details.get("request_attempts", 1)
                             details.update({
                                 "job_type": "scheduled",
@@ -384,9 +406,17 @@ class GiftOperations(commands.Cog):
                 embed.add_field(name="Codes Found", value=f"`{len(found_codes)}`", inline=True)
                 embed.add_field(name="Members Processed", value=f"`{len(members)}`", inline=True)
                 embed.add_field(name="Succeeded", value=f"`{total_success}`", inline=True)
+                embed.add_field(name="Code Skipped", value=f"`{skipped_codes}`", inline=True)
+                embed.add_field(name="Already Redeemed", value=f"`{already_redeemed_members}`", inline=True)
                 embed.add_field(name="Failed Member/Codes", value=f"`{failed_member_codes}`", inline=True)
                 embed.add_field(name="Failed Request Attempts", value=f"`{failed_request_attempts}`", inline=True)
                 embed.add_field(name="Final Failed Jobs", value=f"`{final_failed_jobs}`", inline=True)
+                if skipped_code_details:
+                    skipped_preview = "\n".join(
+                        f"Code `{code}`: `Code skipped for all members.`"
+                        for code in skipped_code_details[:5]
+                    )
+                    embed.add_field(name="Skipped Codes", value=skipped_preview, inline=False)
                 if failure_details:
                     preview = "\n".join(
                         f"FID `{item.get('fid')}`: `{str(item.get('error_reason'))[:80]}`"
@@ -547,17 +577,17 @@ class GiftOperations(commands.Cog):
 
     async def show_gift_menu(self, interaction: discord.Interaction):
         gift_menu_embed = discord.Embed(
-            title="🎁 Gift Code Operations",
+            title="🎁 Gift Redemption",
             description=(
                 "Please select an operation:\n\n"
                 "**Available Operations**\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "🎫 **Create Gift Code**\n"
-                "└ Generate new gift codes\n\n"
-                "📋 **List Gift Codes**\n"
-                "└ View all active codes\n\n"
-                "⚙️ **Auto Gift Settings**\n"
-                "└ Configure automatic gift code usage\n\n"
+                "✍️ **Manual Gift Code**\n"
+                "└ Enter a gift code and redeem it for each FID in the selected alliance\n\n"
+                "� **Scan Last 5 Codes**\n"
+                "└ Scan backward until 5 valid gift codes are found, then redeem each code for each FID once\n\n"
+                "⏱️ **Scheduled Redemption**\n"
+                "└ Configure scheduled gift code scanning and redemption intervals\n\n"
                 "━━━━━━━━━━━━━━━━━━━━━━"
             ),
             color=discord.Color.gold()
@@ -599,18 +629,20 @@ class GiftOperations(commands.Cog):
         enabled_alliances = self.get_auto_gift_enabled_alliances(interaction.guild_id, alliances)
 
         embed = discord.Embed(
-            title="⚙️ Auto Gift Code Settings",
+            title="⏱️ Scheduled Redemption Settings",
             description=(
                 "**Available Options**\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 "📢 **Set Gift Code Channel**\n"
-                "└ Save the channel used for auto gift code messages\n\n"
+                "└ Save the channel used for gift code scanning\n\n"
                 "📊 **Set Results Channel**\n"
-                "└ Save the channel used for auto redemption results\n\n"
+                "└ Save the channel used for redemption results\n\n"
                 "🛡️ **Configure Alliances**\n"
-                "└ Toggle which alliances participate in auto-redemption\n\n"
-                "🔍 **Scan Gift Code Channel**\n"
-                "└ Scan the last 50 messages for gift codes\n"
+                "└ Toggle which alliances participate in scheduled redemption\n\n"
+                "🔍 **Scan Last 5 Codes**\n"
+                "└ Scan backward until 5 valid gift codes are found\n\n"
+                "⏲️ **Redemption Intervals**\n"
+                "└ 6h, 12h, 24h, 48h, 72h, 7d\n"
                 "━━━━━━━━━━━━━━━━━━━━━━"
             ),
             color=discord.Color.gold()
@@ -833,17 +865,19 @@ class GiftOperations(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         found_codes = []
-        async for message in gift_channel.history(limit=5):
+        async for message in gift_channel.history(limit=200):
             gift_code = self.extract_auto_gift_code(message.content)
             if gift_code and gift_code not in found_codes:
                 found_codes.append(gift_code)
+                if len(found_codes) >= 5:
+                    break
 
         results_channel = self.get_auto_gift_results_channel(interaction.guild, gift_channel)
 
         if not found_codes:
             embed = discord.Embed(
                 title="🔍 Gift Code Channel Scan Complete",
-                description="No gift codes found in the last 50 messages.",
+                description="No valid gift codes were found while scanning recent messages.",
                 color=discord.Color.orange()
             )
             await results_channel.send(embed=embed)
@@ -918,17 +952,35 @@ class GiftOperations(commands.Cog):
         return self.alliance_cursor.fetchone()
 
     def get_gift_code_failure_reason(self, data):
-        msg = data.get("msg") if isinstance(data, dict) else None
-        if not msg:
-            return "Unknown error"
+        if not isinstance(data, dict):
+            return "WOS rejected the request, but the response format was invalid."
+
+        msg = str(data.get("msg") or "").strip()
+        err_code = data.get("err_code")
+
+        if err_code == 40008 or msg.upper() == "RECEIVED.":
+            return "Code not claimable for this FID (already redeemed, expired, or otherwise rejected by WOS)."
 
         reason_mapping = {
             "same gift code": "Already redeemed",
             "expired": "Code expired",
             "params error": "Request error (params)",
-            "gift code not found": "Invalid code"
+            "gift code not found": "Invalid code",
+            "not login.": "WOS session/login required before redemption.",
+            "captcha check error.": "Captcha verification failed.",
         }
-        return reason_mapping.get(msg, msg)
+
+        normalized_msg = msg.lower()
+        if normalized_msg in reason_mapping:
+            return reason_mapping[normalized_msg]
+
+        if msg:
+            return f"WOS rejected the request: {msg}"
+
+        if err_code is not None:
+            return f"WOS rejected the request with err_code {err_code}."
+
+        return "WOS rejected the request, but no detailed reason was provided."
 
     def build_wos_form_sign(self, form: str):
         return hashlib.md5((form + self.wos_encrypt_key).encode('utf-8')).hexdigest()
@@ -936,10 +988,16 @@ class GiftOperations(commands.Cog):
     def build_wos_headers(self):
         return {
             "accept": "application/json, text/plain, */*",
+            "accept-language": "en-US,en;q=0.9",
+            "cache-control": "no-cache",
             "content-type": "application/x-www-form-urlencoded",
-            "origin": self.wos_giftcode_redemption_url,
-            "referer": f"{self.wos_giftcode_redemption_url}/",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "origin": "https://wos-giftcode.centurygame.com",
+            "pragma": "no-cache",
+            "referer": "https://wos-giftcode.centurygame.com/",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site",
+            "user-agent": "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0",
         }
 
     def extract_captcha_image_base64(self, captcha_response):
@@ -958,21 +1016,49 @@ class GiftOperations(commands.Cog):
             return None
         return image_data
 
-    async def fetch_wos_captcha_image_base64(self, session, fid_value: str, headers: dict):
+    async def fetch_wos_player_info_for_redemption(self, session, fid_value: str, headers: dict):
         time_val = str(int(datetime.now().timestamp()))
         form = f"fid={fid_value}&time={time_val}"
-        payload = {"fid": fid_value, "time": time_val, "sign": self.build_wos_form_sign(form)}
+        payload = {
+            "fid": fid_value,
+            "sign": self.build_wos_form_sign(form),
+            "time": time_val,
+        }
+        async with session.post(self.wos_player_info_url, headers=headers, data=payload) as response:
+            response_text = await response.text()
+        try:
+            data = json.loads(response_text)
+        except json.JSONDecodeError:
+            print(f"[WOS-PLAYER-ERROR] invalid_json body={response_text}")
+            return None, "wos_player_failed: invalid player JSON"
+        if data.get("code") != 0:
+            print(f"[WOS-PLAYER-ERROR] response={json.dumps(data, ensure_ascii=False)}")
+            return None, f"wos_player_failed: {data.get('msg')}"
+        return data.get("data", {}), None
+
+    async def fetch_wos_captcha_image_base64(self, session, fid_value: str, headers: dict):
+        time_val = str(int(datetime.now().timestamp() * 1000))
+        form = f"fid={fid_value}&init=0&time={time_val}"
+        payload = {
+            "fid": fid_value,
+            "sign": self.build_wos_form_sign(form),
+            "time": time_val,
+            "init": "0",
+        }
         async with session.post(self.wos_captcha_url, headers=headers, data=payload) as response:
             response_text = await response.text()
         try:
             data = json.loads(response_text)
         except json.JSONDecodeError:
-            return None, "captcha_solver_failed: invalid captcha JSON"
+            print(f"[WOS-CAPTCHA-ERROR] invalid_json body={response_text}")
+            return None, "wos_captcha_failed: invalid captcha JSON"
         if data.get("code") != 0:
-            return None, f"captcha_solver_failed: captcha API returned {data.get('msg')}"
+            print(f"[WOS-CAPTCHA-ERROR] response={json.dumps(data, ensure_ascii=False)}")
+            return None, f"wos_captcha_failed: {data.get('msg')}"
         captcha_base64 = self.extract_captcha_image_base64(data)
         if not captcha_base64:
-            return None, "captcha_solver_failed: captcha image missing"
+            print(f"[WOS-CAPTCHA-ERROR] image_missing response={json.dumps(data, ensure_ascii=False)}")
+            return None, "wos_captcha_failed: captcha image missing"
         return captcha_base64, None
 
     async def solve_captcha_with_2captcha(self, session, captcha_base64: str):
@@ -1081,9 +1167,14 @@ class GiftOperations(commands.Cog):
             )
 
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
+            player_data, player_error = await self.fetch_wos_player_info_for_redemption(session, fid_value, headers)
+            if player_error:
+                return False, self.build_captcha_solver_failed_result(fid, gift_code, redemption_id, player_error)
+
             captcha_base64, captcha_error = await self.fetch_wos_captcha_image_base64(session, fid_value, headers)
             if captcha_error:
                 return False, self.build_captcha_solver_failed_result(fid, gift_code, redemption_id, captcha_error)
+
             captcha_solution, solver_error = await self.solve_captcha_with_2captcha(session, captcha_base64)
             if solver_error or not captcha_solution:
                 return False, self.build_captcha_solver_failed_result(
@@ -1093,132 +1184,131 @@ class GiftOperations(commands.Cog):
                     solver_error or "captcha_solver_failed: empty 2Captcha solution",
                 )
 
-        form = f"captcha_code={captcha_solution}&cdk={gift_code}&fid={fid_value}&time={time_val}"
-        sign = self.build_wos_form_sign(form)
-        form_data = {"cdk": gift_code, "fid": fid_value, "time": time_val, "sign": sign, "captcha_code": captcha_solution}
+            form = f"captcha_code={captcha_solution}&cdk={gift_code}&fid={fid_value}&time={time_val}"
+            sign = self.build_wos_form_sign(form)
+            form_data = {"cdk": gift_code, "fid": fid_value, "time": time_val, "sign": sign, "captcha_code": captcha_solution}
 
-        self.log_redemption_request_shape(gift_code, fid, self.wos_giftcode_url, form_data, headers)
+            self.log_redemption_request_shape(gift_code, fid, self.wos_giftcode_url, form_data, headers)
 
-        return await self.request_redemption_with_backoff(
-            fid=fid,
-            gift_code=gift_code,
-            form_data=form_data,
-            headers=headers,
-            ssl_context=ssl_context,
-            redemption_id=redemption_id,
-        )
+            return await self.request_redemption_with_backoff(
+                session=session,
+                fid=fid,
+                gift_code=gift_code,
+                form_data=form_data,
+                headers=headers,
+                redemption_id=redemption_id,
+            )
 
-    async def request_redemption_with_backoff(self, fid: int, gift_code: str, form_data: dict, headers: dict, ssl_context, redemption_id: str):
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
-            last_result = None
-            for attempt in range(1, self.redemption_max_attempts + 1):
-                try:
-                    print(f"[WOS-REDEEM-REQUEST] function=request_redemption_with_backoff fid={fid} code={gift_code} attempt={attempt}")
-                    async with session.post(self.wos_giftcode_url, headers=headers, data=form_data) as response:
-                        response_text = await response.text()
-                        self.log_redemption_response_shape(gift_code, fid, attempt, response.status, response_text)
-                        last_result = self.build_redemption_result(
-                            fid=fid,
-                            gift_code=gift_code,
-                            redemption_id=redemption_id,
-                            success=False,
-                            status="code_rate_limited" if response.status == 429 else "member_failed",
-                            attempts_used=attempt,
-                            retry_after_used=False,
-                            final_error_reason=f"HTTP {response.status}" if response.status != 200 else None,
-                            api_status_code=response.status,
-                            api_response_body=response_text,
-                        )
-                        if response.status == 429:
-                            if attempt < self.redemption_max_attempts:
-                                delay, retry_after_used = self.get_redemption_retry_delay(response, attempt)
-                                last_result["retry_after_used"] = retry_after_used
-                                self.log_redemption_retry(gift_code, fid, attempt, delay, "HTTP 429")
-                                await asyncio.sleep(delay)
-                                continue
-                            last_result["final_error_reason"] = "HTTP 429 rate limited"
-                            last_result["error_reason"] = "HTTP 429 rate limited"
-                            last_result["final_state"] = "failed"
-                            return False, last_result
-                        if response.status != 200:
-                            return False, last_result
-                        try:
-                            data = json.loads(response_text)
-                        except json.JSONDecodeError as e:
-                            last_result.update({
-                                "final_error_reason": "Invalid JSON response",
-                                "error_reason": "Invalid JSON response",
-                                "exception_message": str(e),
-                                "exception_type": type(e).__name__,
-                            })
-                            return False, last_result
-                        if data.get("code") == 0 or data.get("success") is True:
-                            return True, self.build_redemption_result(
-                                fid=fid,
-                                gift_code=gift_code,
-                                redemption_id=redemption_id,
-                                success=True,
-                                status="member_redeemed",
-                                attempts_used=attempt,
-                                retry_after_used=last_result.get("retry_after_used", False) if last_result else False,
-                                final_error_reason=None,
-                                api_status_code=response.status,
-                                api_response_body=response_text,
-                            )
-                        failure_reason = self.get_gift_code_failure_reason(data)
-                        failure_status = self.classify_redemption_status({
-                            "api_status_code": response.status,
-                            "error_reason": failure_reason,
-                            "api_response_body": response_text,
-                        })
-                        last_result.update({
-                            "status": failure_status,
-                            "final_error_reason": failure_reason,
-                            "error_reason": failure_reason,
-                            "exception_message": data.get("msg"),
-                            "exception_type": "WOSApiError",
-                        })
-                        return False, last_result
-                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+    async def request_redemption_with_backoff(self, session: aiohttp.ClientSession, fid: int, gift_code: str, form_data: dict, headers: dict, redemption_id: str):
+        last_result = None
+        for attempt in range(1, self.redemption_max_attempts + 1):
+            try:
+                print(f"[WOS-REDEEM-REQUEST] function=request_redemption_with_backoff fid={fid} code={gift_code} attempt={attempt}")
+                async with session.post(self.wos_giftcode_url, headers=headers, data=form_data) as response:
+                    response_text = await response.text()
+                    self.log_redemption_response_shape(gift_code, fid, attempt, response.status, response_text)
                     last_result = self.build_redemption_result(
                         fid=fid,
                         gift_code=gift_code,
                         redemption_id=redemption_id,
                         success=False,
-                        status="member_failed",
+                        status="code_rate_limited" if response.status == 429 else "member_failed",
                         attempts_used=attempt,
                         retry_after_used=False,
-                        final_error_reason=str(e),
-                        api_status_code=None,
-                        api_response_body=None,
-                        exception=e,
+                        final_error_reason=f"HTTP {response.status}" if response.status != 200 else None,
+                        api_status_code=response.status,
+                        api_response_body=response_text,
                     )
-                    if attempt < self.redemption_max_attempts:
-                        delay, retry_after_used = self.get_redemption_retry_delay(None, attempt)
-                        last_result["retry_after_used"] = retry_after_used
-                        self.log_redemption_retry(gift_code, fid, attempt, delay, type(e).__name__)
-                        await asyncio.sleep(delay)
-                        continue
+                    if response.status == 429:
+                        if attempt < self.redemption_max_attempts:
+                            delay, retry_after_used = self.get_redemption_retry_delay(response, attempt)
+                            last_result["retry_after_used"] = retry_after_used
+                            self.log_redemption_retry(gift_code, fid, attempt, delay, "HTTP 429")
+                            await asyncio.sleep(delay)
+                            continue
+                        last_result["final_error_reason"] = "HTTP 429 rate limited"
+                        last_result["error_reason"] = "HTTP 429 rate limited"
+                        last_result["final_state"] = "failed"
+                        return False, last_result
+                    if response.status != 200:
+                        return False, last_result
+                    try:
+                        data = json.loads(response_text)
+                    except json.JSONDecodeError as e:
+                        last_result.update({
+                            "final_error_reason": "Invalid JSON response",
+                            "error_reason": "Invalid JSON response",
+                            "exception_message": str(e),
+                            "exception_type": type(e).__name__,
+                        })
+                        return False, last_result
+                    if data.get("code") == 0 or data.get("success") is True:
+                        return True, self.build_redemption_result(
+                            fid=fid,
+                            gift_code=gift_code,
+                            redemption_id=redemption_id,
+                            success=True,
+                            status="member_redeemed",
+                            attempts_used=attempt,
+                            retry_after_used=last_result.get("retry_after_used", False) if last_result else False,
+                            final_error_reason=None,
+                            api_status_code=response.status,
+                            api_response_body=response_text,
+                        )
+                    failure_reason = self.get_gift_code_failure_reason(data)
+                    failure_status = self.classify_redemption_status({
+                        "api_status_code": response.status,
+                        "error_reason": failure_reason,
+                        "api_response_body": response_text,
+                    })
+                    last_result.update({
+                        "status": failure_status,
+                        "final_error_reason": failure_reason,
+                        "error_reason": failure_reason,
+                        "exception_message": data.get("msg"),
+                        "exception_type": "WOSApiError",
+                    })
                     return False, last_result
-                except Exception as e:
-                    return False, self.build_redemption_result(
-                        fid=fid,
-                        gift_code=gift_code,
-                        redemption_id=redemption_id,
-                        success=False,
-                        status="member_failed",
-                        attempts_used=attempt,
-                        retry_after_used=False,
-                        final_error_reason=str(e),
-                        api_status_code=None,
-                        api_response_body=None,
-                        exception=e,
-                    )
-
-            if last_result:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last_result = self.build_redemption_result(
+                    fid=fid,
+                    gift_code=gift_code,
+                    redemption_id=redemption_id,
+                    success=False,
+                    status="member_failed",
+                    attempts_used=attempt,
+                    retry_after_used=False,
+                    final_error_reason=str(e),
+                    api_status_code=None,
+                    api_response_body=None,
+                    exception=e,
+                )
+                if attempt < self.redemption_max_attempts:
+                    delay, retry_after_used = self.get_redemption_retry_delay(None, attempt)
+                    last_result["retry_after_used"] = retry_after_used
+                    self.log_redemption_retry(gift_code, fid, attempt, delay, type(e).__name__)
+                    await asyncio.sleep(delay)
+                    continue
                 return False, last_result
+            except Exception as e:
+                return False, self.build_redemption_result(
+                    fid=fid,
+                    gift_code=gift_code,
+                    redemption_id=redemption_id,
+                    success=False,
+                    status="member_failed",
+                    attempts_used=attempt,
+                    retry_after_used=False,
+                    final_error_reason=str(e),
+                    api_status_code=None,
+                    api_response_body=None,
+                    exception=e,
+                )
 
-            return False, self.build_redemption_result(
+        if last_result:
+            return False, last_result
+
+        return False, self.build_redemption_result(
                 fid=fid,
                 gift_code=gift_code,
                 redemption_id=redemption_id,
@@ -1299,13 +1389,27 @@ class GiftOperations(commands.Cog):
             return
 
         success_count = 0
+        already_redeemed_count = 0
+        already_processed_count = 0
         failed = []
+        processed_pairs = set()
 
-        for (fid,) in members[:1]:
+        for (fid,) in members:
+            pair_key = (gift_code, fid)
+
+            if pair_key in processed_pairs:
+                already_processed_count += 1
+                continue
+
+            processed_pairs.add(pair_key)
+
             ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
             if ok:
                 success_count += 1
             else:
+                status_value = str(result.get("status") or "unknown") if isinstance(result, dict) else "unknown"
+                if status_value == "code_not_claimable":
+                    already_redeemed_count += 1
                 failed.append((fid, result))
             await asyncio.sleep(1)
 
@@ -1316,11 +1420,112 @@ class GiftOperations(commands.Cog):
         )
         embed.add_field(name="Total Members", value=f"`{len(members)}`", inline=True)
         embed.add_field(name="Succeeded", value=f"`{success_count}`", inline=True)
+        embed.add_field(name="Already Redeemed", value=f"`{already_redeemed_count}`", inline=True)
+        embed.add_field(name="Already Processed", value=f"`{already_processed_count}`", inline=True)
         embed.add_field(name="Failed", value=f"`{len(failed)}`", inline=True)
 
         if failed:
             failed_preview = "\n".join(f"FID {fid}: {reason}" for fid, reason in failed[:10])
             embed.add_field(name="Failures", value=failed_preview, inline=False)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+    async def show_redeem_diagnostics_menu(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🧪 Redeem Diagnostics",
+            description=(
+                "Run a one-off manual redemption test.\n\n"
+                "Use this for admin diagnostics when gift redemption is failing.\n"
+                "You will enter one FID and one gift code, and the bot will attempt exactly one redemption."
+            ),
+            color=discord.Color.orange()
+        )
+        view = RedeemDiagnosticsView(self)
+        try:
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        except discord.InteractionResponded:
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+class RedeemDiagnosticsView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    @discord.ui.button(label="Run Manual Redeem Test", emoji="🧪", style=discord.ButtonStyle.primary, row=0)
+    async def run_manual_redeem_test_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ Only admins can run Redeem Diagnostics.", ephemeral=True)
+            return
+        await interaction.response.send_modal(RedeemDiagnosticsModal(self.cog))
+
+    @discord.ui.button(label="Back", emoji="↩️", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        other_features_cog = self.cog.bot.get_cog("OtherFeatures")
+        if other_features_cog:
+            await other_features_cog.show_other_features_menu(interaction)
+        else:
+            await interaction.response.send_message("❌ Other Features module not found.", ephemeral=True)
+
+
+class RedeemDiagnosticsModal(discord.ui.Modal, title="Redeem Diagnostics"):
+    fid = discord.ui.TextInput(
+        label="FID",
+        placeholder="Enter one player FID",
+        required=True,
+        max_length=32
+    )
+
+    gift_code = discord.ui.TextInput(
+        label="Gift Code",
+        placeholder="Enter one gift code",
+        required=True,
+        max_length=64
+    )
+
+    def __init__(self, cog):
+        super().__init__(timeout=300)
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
+            await interaction.response.send_message("❌ Only admins can run Redeem Diagnostics.", ephemeral=True)
+            return
+
+        fid_value = str(self.fid.value).strip()
+        gift_code_value = str(self.gift_code.value).strip()
+
+        if not fid_value.isdigit():
+            await interaction.response.send_message("❌ FID must be numeric.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        ok, result = await self.cog.redeem_gift_code_for_fid(int(fid_value), gift_code_value)
+
+        embed = discord.Embed(
+            title="🧪 Redeem Diagnostics Result",
+            color=discord.Color.green() if ok else discord.Color.orange()
+        )
+        embed.add_field(name="FID", value=f"`{fid_value}`", inline=True)
+        embed.add_field(name="Gift Code", value=f"`{gift_code_value}`", inline=True)
+        embed.add_field(name="Success", value=f"`{ok}`", inline=True)
+        embed.add_field(name="Status", value=f"`{result.get('status')}`", inline=True)
+        embed.add_field(name="Final State", value=f"`{result.get('final_state')}`", inline=True)
+        embed.add_field(name="Attempts", value=f"`{result.get('attempts_used')}`", inline=True)
+
+        status_value = str(result.get("status") or "unknown")
+        already_redeemed_value = "Yes" if status_value == "code_not_claimable" else "No"
+
+        error_reason = str(result.get("error_reason") or "None")
+        api_status = result.get("api_status_code")
+        response_body = str(result.get("api_response_body") or "None")
+
+        embed.add_field(name="Already Redeemed", value=f"`{already_redeemed_value}`", inline=True)
+        embed.add_field(name="Error Reason", value=f"```{error_reason[:900]}```", inline=False)
+        embed.add_field(name="API Status", value=f"`{api_status}`", inline=True)
+        embed.add_field(name="Redemption ID", value=f"`{result.get('redemption_id')}`", inline=False)
+        embed.add_field(name="API Response", value=f"```{response_body[:900]}```", inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -1333,27 +1538,16 @@ class GiftMenuView(discord.ui.View):
     async def _not_configured(self, interaction: discord.Interaction, operation: str):
         await interaction.response.send_message(f"❌ {operation} is not configured in this build.", ephemeral=True)
 
-    @discord.ui.button(label="Create Gift Code", emoji="🎫", style=discord.ButtonStyle.primary, row=0)
-    async def create_gift_code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Manual Gift Code", emoji="✍️", style=discord.ButtonStyle.primary, row=0)
+    async def manual_gift_code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_create_gift_code_modal(interaction)
 
-    @discord.ui.button(label="List Gift Codes", emoji="📋", style=discord.ButtonStyle.secondary, row=0)
-    async def list_gift_codes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            self.cog.cursor.execute("SELECT giftcode, date FROM gift_codes ORDER BY date DESC LIMIT 25")
-            codes = self.cog.cursor.fetchall()
-            if not codes:
-                await interaction.response.send_message("❌ No gift codes found.", ephemeral=True)
-                return
-            embed = discord.Embed(title="📋 Gift Codes", color=discord.Color.gold())
-            for giftcode, date in codes:
-                embed.add_field(name=giftcode, value=f"Date: `{date or 'Unknown'}`", inline=False)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message("❌ An error occurred while listing gift codes.", ephemeral=True)
+    @discord.ui.button(label="Scan Last 5 Codes", emoji="�", style=discord.ButtonStyle.secondary, row=0)
+    async def scan_last_5_codes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_auto_gift_settings(interaction)
 
-    @discord.ui.button(label="Auto Gift Settings", emoji="⚙️", style=discord.ButtonStyle.primary, row=1)
-    async def auto_gift_settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Scheduled Redemption", emoji="⏱️", style=discord.ButtonStyle.primary, row=1)
+    async def scheduled_redemption_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_auto_gift_settings(interaction)
 
     @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=2)
@@ -1431,7 +1625,7 @@ class AutoGiftSettingsView(discord.ui.View):
             return
         await self.cog.show_auto_gift_alliance_select(interaction)
 
-    @discord.ui.button(label="Scan Gift Code Channel", emoji="🔍", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Scan Last 5 Codes", emoji="🔍", style=discord.ButtonStyle.success, row=1)
     async def scan_gift_code_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.scan_gift_code_channel(interaction)
 
