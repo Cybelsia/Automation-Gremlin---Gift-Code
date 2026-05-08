@@ -5,6 +5,7 @@ import ssl
 import requests
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
+import base64
 import hashlib
 import json
 from datetime import datetime
@@ -105,9 +106,15 @@ class GiftOperations(commands.Cog):
         self.conn.commit()
         
         self.wos_player_info_url = "https://wos-giftcode-api.centurygame.com/api/player"
+        self.wos_captcha_url = "https://wos-giftcode-api.centurygame.com/api/captcha"
         self.wos_giftcode_url = "https://wos-giftcode-api.centurygame.com/api/gift_code"
         self.wos_giftcode_redemption_url = "https://wos-giftcode.centurygame.com"
         self.wos_encrypt_key = "tB87#kPtkxqOS2"
+        self.twocaptcha_api_key = os.getenv("TWOCAPTCHA_API_KEY")
+        self.twocaptcha_submit_url = "https://2captcha.com/in.php"
+        self.twocaptcha_result_url = "https://2captcha.com/res.php"
+        self.twocaptcha_poll_interval = 5
+        self.twocaptcha_max_wait = 120
         
         self.retry_config = Retry(
             total=20,
@@ -197,11 +204,31 @@ class GiftOperations(commands.Cog):
         reason = str(details.get("error_reason") or "").lower()
         response_body = str(details.get("api_response_body") or "").lower()
         combined = f"{reason} {response_body}"
+        if "captcha_solver_failed" in combined or "captcha solver" in combined:
+            return "captcha_solver_failed"
         if api_status_code == 429 or "rate limit" in combined or "too many" in combined:
             return "code_rate_limited"
         if any(token in combined for token in ("params error", "invalid", "expired", "depleted", "blocked", "not found", "not exist")):
             return "code_invalid"
         return "member_failed"
+
+    def is_code_terminal_status(self, status: str):
+        return status in ("code_invalid", "code_rate_limited", "captcha_solver_failed")
+
+    def has_terminal_code_failure(self, gift_code: str, alliance_id: int, guild_id: int):
+        self.gift_operations_cursor.execute(
+            """
+            SELECT 1
+            FROM redemption_failures
+            WHERE gift_code = ?
+              AND alliance_id = ?
+              AND guild_id = ?
+              AND status IN ('code_invalid', 'code_rate_limited', 'captcha_solver_failed')
+            LIMIT 1
+            """,
+            (gift_code, alliance_id, guild_id)
+        )
+        return self.gift_operations_cursor.fetchone() is not None
 
     @tasks.loop(seconds=60)
     async def alliance_scheduler(self):
@@ -250,7 +277,7 @@ class GiftOperations(commands.Cog):
                 print(f"[SCHEDULER] Scanning alliance_id={alliance_id} name={name} channel={gift_channel_id}")
 
                 found_codes = []
-                async for message in gift_channel.history(limit=50):
+                async for message in gift_channel.history(limit=5):
                     code = self.extract_auto_gift_code(message.content)
                     if code and code not in found_codes:
                         found_codes.append(code)
@@ -275,6 +302,9 @@ class GiftOperations(commands.Cog):
                 final_failed_jobs = 0
                 failure_details = []
                 for gift_code in found_codes:
+                    if self.has_terminal_code_failure(gift_code, alliance_id, guild_id):
+                        print(f"[SCHEDULER-SKIP] code={gift_code} alliance_id={alliance_id} reason=terminal_code_failure")
+                        continue
                     first_fid = members[0][0]
                     print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=starting")
                     ok, result = await self.redeem_gift_code_for_fid(first_fid, gift_code)
@@ -294,7 +324,7 @@ class GiftOperations(commands.Cog):
                         status = self.classify_redemption_status(details)
                         details.update({
                             "job_type": "scheduled",
-                            "final_state": "job_failed_final" if status in ("code_invalid", "code_rate_limited") else "member_failed",
+                            "final_state": "job_failed_final" if self.is_code_terminal_status(status) else "member_failed",
                             "status": status,
                             "alliance_id": alliance_id,
                             "alliance_name": name,
@@ -306,7 +336,7 @@ class GiftOperations(commands.Cog):
                         print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status={status}")
                         print(f"[SCHEDULER-REDEEM-FAIL] {json.dumps(details, ensure_ascii=False)}")
                         await self.send_redemption_failure_summary(guild, results_channel, details)
-                        if status in ("code_invalid", "code_rate_limited"):
+                        if self.is_code_terminal_status(status):
                             print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} status={status} action=stop_member_fanout")
                             await asyncio.sleep(1)
                             continue
@@ -330,7 +360,7 @@ class GiftOperations(commands.Cog):
                             failed_request_attempts += details.get("request_attempts", 1)
                             details.update({
                                 "job_type": "scheduled",
-                                "final_state": "job_failed_final" if status in ("code_invalid", "code_rate_limited") else "member_failed",
+                                "final_state": "job_failed_final" if self.is_code_terminal_status(status) else "member_failed",
                                 "status": status,
                                 "alliance_id": alliance_id,
                                 "alliance_name": name,
@@ -340,7 +370,7 @@ class GiftOperations(commands.Cog):
                             failure_details.append(details)
                             print(f"[SCHEDULER-REDEEM-FAIL] {json.dumps(details, ensure_ascii=False)}")
                             await self.send_redemption_failure_summary(guild, results_channel, details)
-                            if status in ("code_invalid", "code_rate_limited"):
+                            if self.is_code_terminal_status(status):
                                 print(f"[SCHEDULER-REDEEM] code={gift_code} status={status} action=stop_member_fanout")
                                 await asyncio.sleep(1)
                                 break
@@ -752,6 +782,9 @@ class GiftOperations(commands.Cog):
         for gift_code in gift_codes:
             processed_codes += 1
             for alliance_id, alliance_name in alliances:
+                if self.has_terminal_code_failure(gift_code, alliance_id, guild_id):
+                    print(f"[AUTO-GIFT-SKIP] code={gift_code} alliance_id={alliance_id} reason=terminal_code_failure")
+                    continue
                 with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
                     users_cursor = users_conn.cursor()
                     users_cursor.execute("SELECT fid FROM users WHERE alliance = ?", (alliance_id,))
@@ -768,6 +801,10 @@ class GiftOperations(commands.Cog):
                     else:
                         total_failed += 1
                         print(f"[AUTO-GIFT] FAIL fid={fid} code={gift_code} reason={result}")
+                        status = self.classify_redemption_status(result if isinstance(result, dict) else {"error_reason": str(result)})
+                        if self.is_code_terminal_status(status):
+                            print(f"[AUTO-GIFT] code={gift_code} status={status} action=stop_member_fanout")
+                            break
                     await asyncio.sleep(1)
 
         return {
@@ -796,7 +833,7 @@ class GiftOperations(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         found_codes = []
-        async for message in gift_channel.history(limit=50):
+        async for message in gift_channel.history(limit=5):
             gift_code = self.extract_auto_gift_code(message.content)
             if gift_code and gift_code not in found_codes:
                 found_codes.append(gift_code)
@@ -893,6 +930,107 @@ class GiftOperations(commands.Cog):
         }
         return reason_mapping.get(msg, msg)
 
+    def build_wos_form_sign(self, form: str):
+        return hashlib.md5((form + self.wos_encrypt_key).encode('utf-8')).hexdigest()
+
+    def build_wos_headers(self):
+        return {
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/x-www-form-urlencoded",
+            "origin": self.wos_giftcode_redemption_url,
+            "referer": f"{self.wos_giftcode_redemption_url}/",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+    def extract_captcha_image_base64(self, captcha_response):
+        if not isinstance(captcha_response, dict) or not isinstance(captcha_response.get("data"), dict):
+            return None
+        image_data = captcha_response["data"].get("img")
+        if not isinstance(image_data, str):
+            return None
+        if "," in image_data and "base64" in image_data[:50]:
+            image_data = image_data.split(",", 1)[1]
+        try:
+            decoded = base64.b64decode(image_data, validate=True)
+        except Exception:
+            return None
+        if len(decoded) < 100:
+            return None
+        return image_data
+
+    async def fetch_wos_captcha_image_base64(self, session, fid_value: str, headers: dict):
+        time_val = str(int(datetime.now().timestamp()))
+        form = f"fid={fid_value}&time={time_val}"
+        payload = {"fid": fid_value, "time": time_val, "sign": self.build_wos_form_sign(form)}
+        async with session.post(self.wos_captcha_url, headers=headers, data=payload) as response:
+            response_text = await response.text()
+        try:
+            data = json.loads(response_text)
+        except json.JSONDecodeError:
+            return None, "captcha_solver_failed: invalid captcha JSON"
+        if data.get("code") != 0:
+            return None, f"captcha_solver_failed: captcha API returned {data.get('msg')}"
+        captcha_base64 = self.extract_captcha_image_base64(data)
+        if not captcha_base64:
+            return None, "captcha_solver_failed: captcha image missing"
+        return captcha_base64, None
+
+    async def solve_captcha_with_2captcha(self, session, captcha_base64: str):
+        if not self.twocaptcha_api_key:
+            return None, "captcha_solver_failed: TWOCAPTCHA_API_KEY missing"
+        submit_payload = {
+            "key": self.twocaptcha_api_key,
+            "method": "base64",
+            "body": captcha_base64,
+            "json": 1,
+        }
+        async with session.post(self.twocaptcha_submit_url, data=submit_payload) as response:
+            submit_text = await response.text()
+        try:
+            submit_data = json.loads(submit_text)
+        except json.JSONDecodeError:
+            return None, "captcha_solver_failed: 2Captcha submit invalid JSON"
+        if submit_data.get("status") != 1:
+            return None, f"captcha_solver_failed: 2Captcha submit {submit_data.get('request')}"
+
+        captcha_id = submit_data.get("request")
+        deadline = asyncio.get_event_loop().time() + self.twocaptcha_max_wait
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(self.twocaptcha_poll_interval)
+            result_params = {
+                "key": self.twocaptcha_api_key,
+                "action": "get",
+                "id": captcha_id,
+                "json": 1,
+            }
+            async with session.get(self.twocaptcha_result_url, params=result_params) as response:
+                result_text = await response.text()
+            try:
+                result_data = json.loads(result_text)
+            except json.JSONDecodeError:
+                return None, "captcha_solver_failed: 2Captcha poll invalid JSON"
+            if result_data.get("status") == 1:
+                return result_data.get("request"), None
+            if result_data.get("request") != "CAPCHA_NOT_READY":
+                return None, f"captcha_solver_failed: 2Captcha poll {result_data.get('request')}"
+        return None, "captcha_solver_failed: 2Captcha timeout"
+
+    def build_captcha_solver_failed_result(self, fid: int, gift_code: str, redemption_id: str, reason: str):
+        result = self.build_redemption_result(
+            fid=fid,
+            gift_code=gift_code,
+            redemption_id=redemption_id,
+            success=False,
+            status="captcha_solver_failed",
+            attempts_used=0,
+            retry_after_used=False,
+            final_error_reason=reason,
+            api_status_code=None,
+            api_response_body=None,
+        )
+        result["final_state"] = "failed"
+        return result
+
     async def show_gift_code_alliance_select(self, interaction: discord.Interaction, gift_code: str):
         if interaction.guild_id is None:
             await interaction.response.send_message("❌ This can only be used in a server.", ephemeral=True)
@@ -927,21 +1065,37 @@ class GiftOperations(commands.Cog):
     async def redeem_gift_code_for_fid(self, fid: int, gift_code: str):
         time_val = str(int(datetime.now().timestamp()))
         fid_value = str(fid)
-        form = f"cdk={gift_code}&fid={fid_value}&time={time_val}"
-        sign = hashlib.md5((form + self.wos_encrypt_key).encode('utf-8')).hexdigest()
-        form_data = {"cdk": gift_code, "fid": fid_value, "time": time_val, "sign": sign}
         redemption_id = f"{gift_code}:{fid}:{time_val}"
-        headers = {
-            "accept": "application/json, text/plain, */*",
-            "content-type": "application/x-www-form-urlencoded",
-            "origin": self.wos_giftcode_redemption_url,
-            "referer": f"{self.wos_giftcode_redemption_url}/",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
+        headers = self.build_wos_headers()
 
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
+
+        if not self.twocaptcha_api_key:
+            return False, self.build_captcha_solver_failed_result(
+                fid,
+                gift_code,
+                redemption_id,
+                "captcha_solver_failed: TWOCAPTCHA_API_KEY missing",
+            )
+
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
+            captcha_base64, captcha_error = await self.fetch_wos_captcha_image_base64(session, fid_value, headers)
+            if captcha_error:
+                return False, self.build_captcha_solver_failed_result(fid, gift_code, redemption_id, captcha_error)
+            captcha_solution, solver_error = await self.solve_captcha_with_2captcha(session, captcha_base64)
+            if solver_error or not captcha_solution:
+                return False, self.build_captcha_solver_failed_result(
+                    fid,
+                    gift_code,
+                    redemption_id,
+                    solver_error or "captcha_solver_failed: empty 2Captcha solution",
+                )
+
+        form = f"captcha_code={captcha_solution}&cdk={gift_code}&fid={fid_value}&time={time_val}"
+        sign = self.build_wos_form_sign(form)
+        form_data = {"cdk": gift_code, "fid": fid_value, "time": time_val, "sign": sign, "captcha_code": captcha_solution}
 
         self.log_redemption_request_shape(gift_code, fid, self.wos_giftcode_url, form_data, headers)
 
