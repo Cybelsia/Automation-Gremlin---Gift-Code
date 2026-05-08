@@ -297,7 +297,7 @@ class SettingsMenuView(discord.ui.View):
     async def gift_code_operations_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = self.cog.bot.get_cog("GiftOperations")
         if cog:
-            await cog.show_gift_menu(interaction)
+            await cog.show_create_gift_code_modal(interaction)
         else:
             await self._missing_cog(interaction, "Gift Code Operations")
 

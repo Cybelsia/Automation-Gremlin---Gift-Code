@@ -149,6 +149,7 @@ bot = GremlinBot(command_prefix="!", intents=intents)
 
 COGS = [
     "cogs.permissions",
+    "cogs.diagnostics",
     "cogs.alliance",
     "cogs.alliance_member_operations",
     "cogs.bot_operations",
