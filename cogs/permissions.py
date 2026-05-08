@@ -8,6 +8,7 @@ from discord.ext import commands
 
 
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "1237812594140512347"))
+BOT_OWNER_IDS = {BOT_OWNER_ID}
 ROLE_LEVELS = {
     "mod": 1,
     "admin": 2,
@@ -47,7 +48,10 @@ class Permissions(commands.Cog):
         self.conn.commit()
 
     def is_owner(self, user_id: int) -> bool:
-        return user_id == BOT_OWNER_ID
+        return user_id in BOT_OWNER_IDS
+
+    def is_owner_or_bot_user(self, user_id: int) -> bool:
+        return is_owner_or_bot_user(user_id, self.bot)
 
     def get_role(self, user_id: int, guild_id: int | None) -> str | None:
         if self.is_owner(user_id):
@@ -245,8 +249,18 @@ class Permissions(commands.Cog):
         self.conn.close()
 
 
-def check_permission(user_id: int, guild_id: int | None, min_role: str) -> bool:
-    if user_id == BOT_OWNER_ID:
+def is_owner_user(user_id: int) -> bool:
+    return user_id in BOT_OWNER_IDS
+
+
+def is_owner_or_bot_user(user_id: int, bot: commands.Bot | None = None) -> bool:
+    if is_owner_user(user_id):
+        return True
+    return bool(bot and bot.user and user_id == bot.user.id)
+
+
+def check_permission(user_id: int, guild_id: int | None, min_role: str, bot: commands.Bot | None = None) -> bool:
+    if is_owner_or_bot_user(user_id, bot):
         return True
     if guild_id is None:
         return False

@@ -1,11 +1,22 @@
 from pathlib import Path
+import os
 
 BASE_DIR = Path(__file__).resolve().parent
 COGS_DIR = BASE_DIR / "cogs"
-DB_DIR = BASE_DIR / "db"
-LOG_DIR = BASE_DIR / "log"
-DATA_DIR = BASE_DIR / "data"
-OLD_DB_DIR = BASE_DIR / "old_db"
+
+RAILWAY_VOLUME_MOUNT_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+
+if RAILWAY_VOLUME_MOUNT_PATH:
+    VOLUME_DIR = Path(RAILWAY_VOLUME_MOUNT_PATH)
+    DB_DIR = VOLUME_DIR / "db"
+    LOG_DIR = VOLUME_DIR / "log"
+    DATA_DIR = VOLUME_DIR / "data"
+    OLD_DB_DIR = VOLUME_DIR / "old_db"
+else:
+    DB_DIR = BASE_DIR / "db"
+    LOG_DIR = BASE_DIR / "log"
+    DATA_DIR = BASE_DIR / "data"
+    OLD_DB_DIR = BASE_DIR / "old_db"
 
 ALLIANCE_DB = DB_DIR / "alliance.sqlite"
 BACKUP_DB = DB_DIR / "backup.sqlite"
