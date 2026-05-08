@@ -192,6 +192,7 @@ async def on_ready():
     print("[INFO] Automation Gremlin is online")
 
 async def start_bot():
+    log_storage_paths()
     ensure_folders()
     setup_database()
     await load_cogs()

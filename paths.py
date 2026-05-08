@@ -12,7 +12,9 @@ if RAILWAY_VOLUME_MOUNT_PATH:
     LOG_DIR = VOLUME_DIR / "log"
     DATA_DIR = VOLUME_DIR / "data"
     OLD_DB_DIR = VOLUME_DIR / "old_db"
+    print(f"[PATH] Using Railway volume: {VOLUME_DIR.resolve()}")
 else:
+    print("[WARN] RAILWAY_VOLUME_MOUNT_PATH not set, using local folders")
     DB_DIR = BASE_DIR / "db"
     LOG_DIR = BASE_DIR / "log"
     DATA_DIR = BASE_DIR / "data"
@@ -49,6 +51,14 @@ def log_path(label: str, path: Path) -> None:
     print(f"[PATH] {label}: {path.resolve()}")
 
 
+def log_storage_paths() -> None:
+    print(f"[PATH] RAILWAY_VOLUME_MOUNT_PATH: {RAILWAY_VOLUME_MOUNT_PATH or 'Not set'}")
+    log_path("DB_DIR", DB_DIR)
+    log_path("LOG_DIR", LOG_DIR)
+    log_path("DATA_DIR", DATA_DIR)
+    log_path("OLD_DB_DIR", OLD_DB_DIR)
+
+
 def database_path(path: Path, label: str = "sqlite") -> str:
     ensure_parent(path)
     resolved = path.resolve()
@@ -61,3 +71,32 @@ def file_path(path: Path, label: str = "file") -> str:
     resolved = path.resolve()
     print(f"[PATH] {label}: {resolved}")
     return str(resolved)
+
+
+def storage_health_report() -> str:
+    lines = [
+        "Storage Health Report",
+        "---------------------",
+        f"RAILWAY_VOLUME_MOUNT_PATH: {RAILWAY_VOLUME_MOUNT_PATH or 'NOT SET'}",
+        f"DB_DIR:      {DB_DIR.resolve()}",
+        f"LOG_DIR:     {LOG_DIR.resolve()}",
+        f"DATA_DIR:    {DATA_DIR.resolve()}",
+        f"OLD_DB_DIR:  {OLD_DB_DIR.resolve()}",
+        "",
+        "Database files:",
+    ]
+    db_files = {
+        "ALLIANCE_DB": ALLIANCE_DB,
+        "BACKUP_DB": BACKUP_DB,
+        "BEAR_TRAP_DB": BEAR_TRAP_DB,
+        "CHANGES_DB": CHANGES_DB,
+        "GIFT_CODE_DB": GIFT_CODE_DB,
+        "GIFT_OPERATIONS_DB": GIFT_OPERATIONS_DB,
+        "ID_CHANNEL_DB": ID_CHANNEL_DB,
+        "SETTINGS_DB": SETTINGS_DB,
+        "USERS_DB": USERS_DB,
+    }
+    for name, path in db_files.items():
+        exists = "exists" if path.exists() else "missing"
+        lines.append(f"- {name}: {path.resolve()} ({exists})")
+    return "\n".join(lines)
