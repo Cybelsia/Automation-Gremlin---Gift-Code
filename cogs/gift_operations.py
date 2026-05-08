@@ -1301,7 +1301,7 @@ class GiftOperations(commands.Cog):
         success_count = 0
         failed = []
 
-        for (fid,) in members:
+        for (fid,) in members[:1]:
             ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
             if ok:
                 success_count += 1
