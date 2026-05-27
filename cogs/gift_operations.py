@@ -295,6 +295,58 @@ class GiftOperations(commands.Cog):
         ]
         return dict(zip(columns, row))
 
+    def get_needs_manual_jobs_for_guild(self, guild_id: int):
+        """Step C: return all gift_code_jobs in this guild with status='needs_manual'.
+
+        These are codes that failed automation twice and are now waiting for a mod
+        to accept or reject them in-game.
+
+        Alliance names live in alliance.sqlite (different DB than gift_code_jobs),
+        so we query both cursors and merge in Python. Returns a list of dicts ordered
+        by most-recent attempt first:
+            gift_code, alliance_id, alliance_name, attempts,
+            last_attempt_at, last_error_reason, created_at
+        Unknown alliance ids (e.g. alliance was deleted after the job was created)
+        get a placeholder name like 'Alliance 12345'.
+        """
+        self.gift_operations_cursor.execute(
+            """
+            SELECT gift_code, alliance_id, attempts, last_attempt_at,
+                   last_error_reason, created_at
+            FROM gift_code_jobs
+            WHERE status = 'needs_manual' AND guild_id = ?
+            ORDER BY COALESCE(last_attempt_at, created_at) DESC
+            """,
+            (guild_id,),
+        )
+        job_rows = self.gift_operations_cursor.fetchall()
+        if not job_rows:
+            return []
+
+        alliance_ids = sorted({row[1] for row in job_rows})
+        name_lookup: dict[int, str] = {}
+        if alliance_ids:
+            placeholders = ",".join("?" for _ in alliance_ids)
+            self.alliance_cursor.execute(
+                f"SELECT alliance_id, name FROM alliance_list WHERE alliance_id IN ({placeholders})",
+                alliance_ids,
+            )
+            for alliance_id, name in self.alliance_cursor.fetchall():
+                name_lookup[alliance_id] = name
+
+        results = []
+        for gift_code, alliance_id, attempts, last_attempt_at, last_error_reason, created_at in job_rows:
+            results.append({
+                "gift_code": gift_code,
+                "alliance_id": alliance_id,
+                "alliance_name": name_lookup.get(alliance_id, f"Alliance {alliance_id}"),
+                "attempts": attempts,
+                "last_attempt_at": last_attempt_at,
+                "last_error_reason": last_error_reason,
+                "created_at": created_at,
+            })
+        return results
+
     def should_skip_code_for_alliance(self, gift_code: str, alliance_id: int, force_manual: bool = False) -> bool:
         """Decide whether the scheduler should skip this (code, alliance) on the current tick.
 
@@ -1914,11 +1966,43 @@ class GiftMenuView(discord.ui.View):
 
     @discord.ui.button(label="List Manual Codes", emoji="📋", style=discord.ButtonStyle.primary, row=0)
     async def list_manual_codes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "🚧 List Manual Codes is coming in the next step. "
-            "This will show every code that failed automation twice and now needs a mod to accept or reject it.",
-            ephemeral=True,
-        )
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ You don't have permission to use this feature.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            jobs = self.cog.get_needs_manual_jobs_for_guild(interaction.guild_id)
+        except Exception as exc:
+            print(f"[ERROR] list_manual_codes_button: failed to fetch needs_manual jobs: {exc}")
+            traceback.print_exc()
+            embed = discord.Embed(
+                title="❌ Could Not Load Manual Codes",
+                description=f"Something went wrong reading the manual queue:\n```{str(exc)[:900]}```",
+                color=discord.Color.red(),
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        if not jobs:
+            embed = discord.Embed(
+                title="📋 No Manual Codes Waiting",
+                description=(
+                    "🎉 Nothing is waiting on a moderator right now.\n\n"
+                    "Every code that failed automation has already been handled, "
+                    "or the automatic redemption is still working through its retries."
+                ),
+                color=discord.Color.green(),
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        view = ListManualCodesView(self.cog, jobs)
+        embed = view.build_embed()
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(label="Scan Last 5 Codes", emoji="🔍", style=discord.ButtonStyle.secondary, row=1)
     async def scan_last_5_codes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2042,6 +2126,86 @@ class RetryAutomaticRedemptionAllianceSelect(discord.ui.Select):
             embed.add_field(name="Failure Details", value=preview, inline=False)
         embed.set_footer(text="Cooldown bypassed: auto_failed_1 codes were retried. Failures escalate to needs_manual.")
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class ListManualCodesView(discord.ui.View):
+    """Step C: paginated list of gift codes in status='needs_manual'.
+
+    These are codes that failed automation twice and now need a moderator
+    to apply (or reject) them in-game. The mod accept/reject buttons themselves
+    come in a later step — this view is read-only browsing for now.
+    """
+
+    PAGE_SIZE = 10
+
+    def __init__(self, cog, jobs):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.jobs = jobs
+        self.page = 0
+        self.total_pages = max(1, (len(jobs) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self._refresh_button_state()
+
+    def _refresh_button_state(self):
+        self.previous_button.disabled = self.page <= 0
+        self.next_button.disabled = self.page >= self.total_pages - 1
+
+    def build_embed(self) -> discord.Embed:
+        start = self.page * self.PAGE_SIZE
+        end = start + self.PAGE_SIZE
+        page_jobs = self.jobs[start:end]
+
+        embed = discord.Embed(
+            title="📋 Manual Codes Queue",
+            description=(
+                f"Showing **{start + 1}–{start + len(page_jobs)}** of **{len(self.jobs)}** codes waiting on a moderator.\n"
+                "These failed automatic redemption twice. A mod will need to apply them in-game "
+                "(or mark them as not worth applying) once accept/reject buttons ship in the next step."
+            ),
+            color=discord.Color.orange(),
+        )
+
+        for job in page_jobs:
+            last_attempt = job.get("last_attempt_at") or "never"
+            reason = (job.get("last_error_reason") or "unknown").strip() or "unknown"
+            if len(reason) > 180:
+                reason = reason[:177] + "..."
+            field_value = (
+                f"Alliance: `{job['alliance_name']}`\n"
+                f"Attempts: `{job.get('attempts', 0)}` · Last attempt: `{last_attempt}`\n"
+                f"Last error: `{reason}`"
+            )
+            embed.add_field(
+                name=f"`{job['gift_code']}`",
+                value=field_value,
+                inline=False,
+            )
+
+        embed.set_footer(text=f"Page {self.page + 1} of {self.total_pages}")
+        return embed
+
+    @discord.ui.button(label="Previous", emoji="⬅️", style=discord.ButtonStyle.secondary, row=0)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page > 0:
+            self.page -= 1
+        self._refresh_button_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Next", emoji="➡️", style=discord.ButtonStyle.secondary, row=0)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page < self.total_pages - 1:
+            self.page += 1
+        self._refresh_button_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Back to Gift Menu", emoji="🏠", style=discord.ButtonStyle.primary, row=1)
+    async def back_to_gift_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🎁 Gift Code Operations",
+            description="Choose an action below.",
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.edit_message(embed=embed, view=GiftMenuView(self.cog))
 
 
 class AutoGiftSettingsView(discord.ui.View):
