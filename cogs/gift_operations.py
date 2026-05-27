@@ -683,6 +683,52 @@ class GiftOperations(commands.Cog):
             traceback.print_exc()
             return None
 
+    async def force_run_scheduler_for_alliance(self, alliance_id: int):
+        """Step B2: invoked by the Retry Automatic Redemption button.
+        Looks up the alliance row, acquires the scheduler lock (so we can't race the 60s loop),
+        and runs one scheduler pass for that single alliance with force_manual=True
+        (bypasses the 24h auto_failed_1 cooldown).
+
+        Returns the same summary dict as _run_alliance_scheduler_once, plus an 'error' key
+        with a human-readable string if anything went wrong before redemption started.
+        """
+        try:
+            self.alliance_cursor.execute(
+                """
+                SELECT alliance_id, name, discord_server_id, refresh_rate,
+                       gift_code_channel_id, results_channel_id
+                FROM alliance_list
+                WHERE alliance_id = ?
+                  AND gift_code_channel_id IS NOT NULL
+                  AND refresh_rate IS NOT NULL
+                  AND refresh_rate > 0
+                """,
+                (alliance_id,),
+            )
+            alliance_row = self.alliance_cursor.fetchone()
+            if alliance_row is None:
+                return {"error": "This alliance isn't configured for automatic gift code redemption (no gift code channel or refresh rate). Configure it under Scheduled Redemption first."}
+
+            async with self._alliance_scheduler_lock:
+                print(f"[FORCE-SCHEDULER] alliance_id={alliance_id} starting manual trigger (force_manual=True)")
+                # Reset the cooldown gate so the next auto tick won't immediately skip this alliance.
+                self._last_run[alliance_id] = asyncio.get_event_loop().time()
+                summary = await self._run_alliance_scheduler_once(alliance_row, force_manual=True)
+                print(f"[FORCE-SCHEDULER] alliance_id={alliance_id} finished manual trigger")
+
+            if summary is None:
+                # Skipped before any redemption attempts (no codes found / all already processed / no members).
+                return {
+                    "alliance_id": alliance_id,
+                    "alliance_name": alliance_row[1],
+                    "info": "No new codes to attempt. Either the gift code channel has no recent codes, all visible codes are already processed for this alliance, or the alliance has no members.",
+                }
+            return summary
+        except Exception as e:
+            print(f"[FORCE-SCHEDULER] Error for alliance_id={alliance_id}: {e}")
+            traceback.print_exc()
+            return {"error": f"Unexpected error: {type(e).__name__}: {str(e)[:200]}"}
+
     @alliance_scheduler.before_loop
     async def before_alliance_scheduler(self):
         await self.bot.wait_until_ready()
@@ -1837,11 +1883,34 @@ class GiftMenuView(discord.ui.View):
 
     @discord.ui.button(label="Retry Automatic Redemption", emoji="🔁", style=discord.ButtonStyle.primary, row=0)
     async def retry_automatic_redemption_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "🚧 Retry Automatic Redemption is coming in the next step. "
-            "This will let you pick one alliance and force the scheduler to re-attempt its eligible codes.",
-            ephemeral=True,
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ You don't have permission to use this feature.", ephemeral=True
+            )
+            return
+
+        alliances = self.cog.get_enabled_auto_gift_alliances_for_guild(interaction.guild_id)
+        if not alliances:
+            await interaction.response.send_message(
+                "⚠️ No alliances are configured for automatic gift code redemption in this server. "
+                "Set one up under Scheduled Redemption first.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="🔁 Retry Automatic Redemption",
+            description=(
+                "Pick an alliance to retry now.\n\n"
+                "This runs the same automatic scheduler pass right now instead of waiting up to 24 hours.\n"
+                "Codes already marked **succeeded** or **needs manual** are skipped.\n"
+                "Codes in the 24h cooldown after one failed attempt will be **retried immediately**; "
+                "if they fail again they're escalated to the manual queue."
+            ),
+            color=discord.Color.blurple(),
         )
+        view = RetryAutomaticRedemptionAllianceSelectView(self.cog, alliances)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(label="List Manual Codes", emoji="📋", style=discord.ButtonStyle.primary, row=0)
     async def list_manual_codes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1892,6 +1961,87 @@ class GiftCodeAllianceSelect(discord.ui.Select):
         alliance_name = self.alliance_names.get(self.values[0], f"Alliance {alliance_id}")
         await interaction.response.defer(ephemeral=True, thinking=True)
         await self.cog.create_gift_code_for_alliance(interaction, self.gift_code, alliance_id, alliance_name)
+
+
+class RetryAutomaticRedemptionAllianceSelectView(discord.ui.View):
+    """Step B2: alliance picker for the Retry Automatic Redemption button."""
+    def __init__(self, cog, alliances):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.add_item(RetryAutomaticRedemptionAllianceSelect(cog, alliances))
+
+
+class RetryAutomaticRedemptionAllianceSelect(discord.ui.Select):
+    def __init__(self, cog, alliances):
+        self.cog = cog
+        self.alliance_names = {str(alliance_id): name for alliance_id, name in alliances[:25]}
+        options = [
+            discord.SelectOption(label=name[:100], value=str(alliance_id))
+            for alliance_id, name in alliances[:25]
+        ]
+        super().__init__(
+            placeholder="Select an alliance to retry",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        alliance_id = int(self.values[0])
+        alliance_name = self.alliance_names.get(self.values[0], f"Alliance {alliance_id}")
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        summary = await self.cog.force_run_scheduler_for_alliance(alliance_id)
+
+        if summary is None:
+            embed = discord.Embed(
+                title="🔁 Retry Automatic Redemption",
+                description=f"Alliance: `{alliance_name}`\n\nNo summary returned. Check the bot logs for details.",
+                color=discord.Color.dark_grey(),
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        if "error" in summary:
+            embed = discord.Embed(
+                title="❌ Retry Automatic Redemption Failed",
+                description=f"Alliance: `{alliance_name}`\n\n{summary['error']}",
+                color=discord.Color.red(),
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        if "info" in summary:
+            embed = discord.Embed(
+                title="🔁 Retry Automatic Redemption",
+                description=f"Alliance: `{alliance_name}`\n\n{summary['info']}",
+                color=discord.Color.blurple(),
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        final_failed = summary.get("final_failed_jobs", 0)
+        embed = discord.Embed(
+            title="🔁 Retry Automatic Redemption",
+            description=f"Alliance: `{summary.get('alliance_name', alliance_name)}`",
+            color=discord.Color.green() if final_failed == 0 else discord.Color.orange(),
+        )
+        embed.add_field(name="Codes Found", value=f"`{summary.get('codes_found', 0)}`", inline=True)
+        embed.add_field(name="Members Processed", value=f"`{summary.get('members_processed', 0)}`", inline=True)
+        embed.add_field(name="Succeeded", value=f"`{summary.get('succeeded', 0)}`", inline=True)
+        embed.add_field(name="Code Skipped", value=f"`{summary.get('skipped_codes', 0)}`", inline=True)
+        embed.add_field(name="Already Redeemed", value=f"`{summary.get('already_redeemed_members', 0)}`", inline=True)
+        embed.add_field(name="Failed Member/Codes", value=f"`{summary.get('failed_member_codes', 0)}`", inline=True)
+        embed.add_field(name="Final Failed Jobs", value=f"`{final_failed}`", inline=True)
+        failure_details = summary.get("failure_details") or []
+        if failure_details:
+            preview = "\n".join(
+                f"FID `{item.get('fid')}`: `{str(item.get('error_reason'))[:80]}`"
+                for item in failure_details[:5]
+            )
+            embed.add_field(name="Failure Details", value=preview, inline=False)
+        embed.set_footer(text="Cooldown bypassed: auto_failed_1 codes were retried. Failures escalate to needs_manual.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 class AutoGiftSettingsView(discord.ui.View):
