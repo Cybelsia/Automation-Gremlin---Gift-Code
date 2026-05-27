@@ -435,112 +435,182 @@ class GiftOperations(commands.Cog):
             )
             alliances = self.alliance_cursor.fetchall()
 
-            for alliance_id, name, guild_id, refresh_rate, gift_channel_id, results_channel_id in alliances:
+            for alliance_row in alliances:
+                alliance_id = alliance_row[0]
+                refresh_rate = alliance_row[3]
                 last_run = self._last_run.get(alliance_id, 0)
                 if now - last_run < refresh_rate:
                     continue
-
                 self._last_run[alliance_id] = now
-                guild = self.bot.get_guild(guild_id)
-                if guild is None:
-                    print(f"[SCHEDULER] Guild {guild_id} not found for alliance {alliance_id}, skipping")
+                await self._run_alliance_scheduler_once(alliance_row)
+
+        except Exception as e:
+            print(f"[SCHEDULER] Error in alliance_scheduler: {e}")
+            traceback.print_exc()
+
+    async def _run_alliance_scheduler_once(self, alliance_row):
+        """Run one scheduler pass for ONE alliance. Extracted from _run_alliance_scheduler so
+        it can be invoked on-demand by the manual 'Retry Automatic Redemption' button.
+
+        alliance_row = (alliance_id, name, guild_id, refresh_rate, gift_channel_id, results_channel_id)
+
+        Returns a dict summary so callers (e.g. the manual trigger UI) can show a result embed.
+        Returns None if the alliance was skipped before any redemption work happened
+        (guild/channel missing, no codes found, all codes already processed, no members).
+        """
+        try:
+            alliance_id, name, guild_id, refresh_rate, gift_channel_id, results_channel_id = alliance_row
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                print(f"[SCHEDULER] Guild {guild_id} not found for alliance {alliance_id}, skipping")
+                return None
+
+            gift_channel = guild.get_channel(gift_channel_id)
+            if gift_channel is None:
+                print(f"[SCHEDULER] Gift code channel {gift_channel_id} not found for alliance {alliance_id}, skipping")
+                return None
+
+            results_channel = guild.get_channel(results_channel_id) if results_channel_id else gift_channel
+
+            print(f"[SCHEDULER] Scanning alliance_id={alliance_id} name={name} channel={gift_channel_id}")
+
+            found_codes = []
+            async for message in gift_channel.history(limit=200):
+                code = self.extract_auto_gift_code(message.content)
+                if code and code not in found_codes:
+                    found_codes.append(code)
+                    if len(found_codes) >= 5:
+                        break
+
+            if not found_codes:
+                print(f"[SCHEDULER] No codes found for alliance_id={alliance_id}")
+                return None
+
+            # Step 1: filter out codes we've already recorded a job for on this alliance.
+            # This stops the bot from re-attempting the same code every cycle.
+            unprocessed_codes = [
+                c for c in found_codes
+                if not self.should_skip_code_for_alliance(c, alliance_id)
+            ]
+            skipped_already_processed = len(found_codes) - len(unprocessed_codes)
+            if skipped_already_processed:
+                print(
+                    f"[SCHEDULER] alliance_id={alliance_id} "
+                    f"skipped_already_processed={skipped_already_processed} "
+                    f"unprocessed_remaining={len(unprocessed_codes)}"
+                )
+            if not unprocessed_codes:
+                print(f"[SCHEDULER] alliance_id={alliance_id} all_found_codes_already_processed")
+                return None
+            found_codes = unprocessed_codes
+
+            # Redeem only for this specific alliance
+            with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
+                users_cursor = users_conn.cursor()
+                users_cursor.execute("SELECT fid FROM users WHERE alliance = ?", (alliance_id,))
+                members = users_cursor.fetchall()
+
+            if not members:
+                print(f"[SCHEDULER] No members for alliance_id={alliance_id}, skipping")
+                return None
+
+            total_success = 0
+            failed_member_codes = 0
+            failed_request_attempts = 0
+            final_failed_jobs = 0
+            failure_details = []
+            skipped_codes = 0
+            skipped_code_details = []
+            already_redeemed_members = 0
+            processed_pairs = set()
+            for gift_code in found_codes:
+                if self.has_terminal_code_failure(gift_code, alliance_id, guild_id):
+                    skipped_codes += 1
+                    skipped_code_details.append(gift_code)
+                    print(f"[SCHEDULER-SKIP] code={gift_code} alliance_id={alliance_id} reason=terminal_code_failure")
                     continue
-
-                gift_channel = guild.get_channel(gift_channel_id)
-                if gift_channel is None:
-                    print(f"[SCHEDULER] Gift code channel {gift_channel_id} not found for alliance {alliance_id}, skipping")
+                first_fid = members[0][0]
+                if (gift_code, first_fid) in processed_pairs:
+                    print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=skipped_duplicate_pair")
                     continue
-
-                results_channel = guild.get_channel(results_channel_id) if results_channel_id else gift_channel
-
-                print(f"[SCHEDULER] Scanning alliance_id={alliance_id} name={name} channel={gift_channel_id}")
-
-                found_codes = []
-                async for message in gift_channel.history(limit=200):
-                    code = self.extract_auto_gift_code(message.content)
-                    if code and code not in found_codes:
-                        found_codes.append(code)
-                        if len(found_codes) >= 5:
-                            break
-
-                if not found_codes:
-                    print(f"[SCHEDULER] No codes found for alliance_id={alliance_id}")
-                    continue
-
-                # Step 1: filter out codes we've already recorded a job for on this alliance.
-                # This stops the bot from re-attempting the same code every cycle.
-                unprocessed_codes = [
-                    c for c in found_codes
-                    if not self.should_skip_code_for_alliance(c, alliance_id)
-                ]
-                skipped_already_processed = len(found_codes) - len(unprocessed_codes)
-                if skipped_already_processed:
-                    print(
-                        f"[SCHEDULER] alliance_id={alliance_id} "
-                        f"skipped_already_processed={skipped_already_processed} "
-                        f"unprocessed_remaining={len(unprocessed_codes)}"
+                processed_pairs.add((gift_code, first_fid))
+                print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=starting")
+                ok, result = await self.redeem_gift_code_for_fid(first_fid, gift_code)
+                # Step 1: record this (code, alliance) so we never retry it on the next tick.
+                # Step 2 will refine this with 24h retry logic.
+                if ok:
+                    self.record_gift_code_job_attempt(
+                        gift_code=gift_code,
+                        alliance_id=alliance_id,
+                        guild_id=guild_id,
+                        status="auto_succeeded",
                     )
-                if not unprocessed_codes:
-                    print(f"[SCHEDULER] alliance_id={alliance_id} all_found_codes_already_processed")
-                    continue
-                found_codes = unprocessed_codes
-
-                # Redeem only for this specific alliance
-                with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
-                    users_cursor = users_conn.cursor()
-                    users_cursor.execute("SELECT fid FROM users WHERE alliance = ?", (alliance_id,))
-                    members = users_cursor.fetchall()
-
-                if not members:
-                    print(f"[SCHEDULER] No members for alliance_id={alliance_id}, skipping")
-                    continue
-
-                total_success = 0
-                failed_member_codes = 0
-                failed_request_attempts = 0
-                final_failed_jobs = 0
-                failure_details = []
-                skipped_codes = 0
-                skipped_code_details = []
-                already_redeemed_members = 0
-                processed_pairs = set()
-                for gift_code in found_codes:
-                    if self.has_terminal_code_failure(gift_code, alliance_id, guild_id):
-                        skipped_codes += 1
-                        skipped_code_details.append(gift_code)
-                        print(f"[SCHEDULER-SKIP] code={gift_code} alliance_id={alliance_id} reason=terminal_code_failure")
+                    total_success += 1
+                    print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=member_redeemed action=continue_member_fanout")
+                    member_iterable = members[1:]
+                else:
+                    failed_member_codes += 1
+                    final_failed_jobs += 1
+                    details = result if isinstance(result, dict) else {
+                        "error_reason": str(result),
+                        "gift_code": gift_code,
+                        "fid": first_fid,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    status = self.classify_redemption_status(details)
+                    if status == "code_not_claimable":
+                        already_redeemed_members += 1
+                    details.update({
+                        "job_type": "scheduled",
+                        "final_state": "job_failed_final" if self.is_code_terminal_status(status) else "member_failed",
+                        "status": status,
+                        "alliance_id": alliance_id,
+                        "alliance_name": name,
+                        "guild_id": guild_id,
+                    })
+                    failed_request_attempts += details.get("request_attempts", 1)
+                    self.save_redemption_failure(details)
+                    failure_details.append(details)
+                    # Step 1: record the failure so we don't retry this same (code, alliance) next tick.
+                    # Step 2: "auto_failed_1" gets a 24h retry; second failure escalates to needs_manual.
+                    self.record_gift_code_job_attempt(
+                        gift_code=gift_code,
+                        alliance_id=alliance_id,
+                        guild_id=guild_id,
+                        status="auto_failed_1",
+                        error_reason=details.get("error_reason"),
+                    )
+                    print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status={status}")
+                    print(f"[SCHEDULER-REDEEM-FAIL] {json.dumps(details, ensure_ascii=False)}")
+                    await self.send_redemption_failure_summary(guild, results_channel, details)
+                    if self.is_code_terminal_status(status):
+                        print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} status={status} action=stop_member_fanout")
+                        await asyncio.sleep(1)
                         continue
-                    first_fid = members[0][0]
-                    if (gift_code, first_fid) in processed_pairs:
-                        print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=skipped_duplicate_pair")
+                    member_iterable = members[1:]
+
+                for (fid,) in member_iterable:
+                    if (gift_code, fid) in processed_pairs:
+                        print(f"[SCHEDULER-REDEEM] code={gift_code} fid={fid} status=skipped_duplicate_pair")
                         continue
-                    processed_pairs.add((gift_code, first_fid))
-                    print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=starting")
-                    ok, result = await self.redeem_gift_code_for_fid(first_fid, gift_code)
-                    # Step 1: record this (code, alliance) so we never retry it on the next tick.
-                    # Step 2 will refine this with 24h retry logic.
+                    processed_pairs.add((gift_code, fid))
+                    ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
                     if ok:
-                        self.record_gift_code_job_attempt(
-                            gift_code=gift_code,
-                            alliance_id=alliance_id,
-                            guild_id=guild_id,
-                            status="auto_succeeded",
-                        )
                         total_success += 1
-                        print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=member_redeemed action=continue_member_fanout")
-                        member_iterable = members[1:]
+                        print(f"[SCHEDULER-REDEEM] code={gift_code} fid={fid} status=member_redeemed")
                     else:
                         failed_member_codes += 1
                         final_failed_jobs += 1
                         details = result if isinstance(result, dict) else {
                             "error_reason": str(result),
                             "gift_code": gift_code,
-                            "fid": first_fid,
+                            "fid": fid,
                             "timestamp": datetime.utcnow().isoformat()
                         }
                         status = self.classify_redemption_status(details)
                         if status == "code_not_claimable":
                             already_redeemed_members += 1
+                        failed_request_attempts += details.get("request_attempts", 1)
                         details.update({
                             "job_type": "scheduled",
                             "final_state": "job_failed_final" if self.is_code_terminal_status(status) else "member_failed",
@@ -549,97 +619,61 @@ class GiftOperations(commands.Cog):
                             "alliance_name": name,
                             "guild_id": guild_id,
                         })
-                        failed_request_attempts += details.get("request_attempts", 1)
                         self.save_redemption_failure(details)
                         failure_details.append(details)
-                        # Step 1: record the failure so we don't retry this same (code, alliance) next tick.
-                        # In Step 2, "auto_failed_1" will get a 24h retry; for now it just blocks re-attempts.
-                        self.record_gift_code_job_attempt(
-                            gift_code=gift_code,
-                            alliance_id=alliance_id,
-                            guild_id=guild_id,
-                            status="auto_failed_1",
-                            error_reason=details.get("error_reason"),
-                        )
-                        print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status={status}")
                         print(f"[SCHEDULER-REDEEM-FAIL] {json.dumps(details, ensure_ascii=False)}")
                         await self.send_redemption_failure_summary(guild, results_channel, details)
                         if self.is_code_terminal_status(status):
-                            print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} status={status} action=stop_member_fanout")
+                            print(f"[SCHEDULER-REDEEM] code={gift_code} status={status} action=stop_member_fanout")
                             await asyncio.sleep(1)
-                            continue
-                        member_iterable = members[1:]
+                            break
+                    await asyncio.sleep(1)
 
-                    for (fid,) in member_iterable:
-                        if (gift_code, fid) in processed_pairs:
-                            print(f"[SCHEDULER-REDEEM] code={gift_code} fid={fid} status=skipped_duplicate_pair")
-                            continue
-                        processed_pairs.add((gift_code, fid))
-                        ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
-                        if ok:
-                            total_success += 1
-                            print(f"[SCHEDULER-REDEEM] code={gift_code} fid={fid} status=member_redeemed")
-                        else:
-                            failed_member_codes += 1
-                            final_failed_jobs += 1
-                            details = result if isinstance(result, dict) else {
-                                "error_reason": str(result),
-                                "gift_code": gift_code,
-                                "fid": fid,
-                                "timestamp": datetime.utcnow().isoformat()
-                            }
-                            status = self.classify_redemption_status(details)
-                            if status == "code_not_claimable":
-                                already_redeemed_members += 1
-                            failed_request_attempts += details.get("request_attempts", 1)
-                            details.update({
-                                "job_type": "scheduled",
-                                "final_state": "job_failed_final" if self.is_code_terminal_status(status) else "member_failed",
-                                "status": status,
-                                "alliance_id": alliance_id,
-                                "alliance_name": name,
-                                "guild_id": guild_id,
-                            })
-                            self.save_redemption_failure(details)
-                            failure_details.append(details)
-                            print(f"[SCHEDULER-REDEEM-FAIL] {json.dumps(details, ensure_ascii=False)}")
-                            await self.send_redemption_failure_summary(guild, results_channel, details)
-                            if self.is_code_terminal_status(status):
-                                print(f"[SCHEDULER-REDEEM] code={gift_code} status={status} action=stop_member_fanout")
-                                await asyncio.sleep(1)
-                                break
-                        await asyncio.sleep(1)
-
-                embed = discord.Embed(
-                    title="⏰ Scheduled Gift Code Redemption",
-                    description=f"Alliance: `{name}`",
-                    color=discord.Color.green() if final_failed_jobs == 0 else discord.Color.orange()
+            embed = discord.Embed(
+                title="⏰ Scheduled Gift Code Redemption",
+                description=f"Alliance: `{name}`",
+                color=discord.Color.green() if final_failed_jobs == 0 else discord.Color.orange()
+            )
+            embed.add_field(name="Codes Found", value=f"`{len(found_codes)}`", inline=True)
+            embed.add_field(name="Members Processed", value=f"`{len(members)}`", inline=True)
+            embed.add_field(name="Succeeded", value=f"`{total_success}`", inline=True)
+            embed.add_field(name="Code Skipped", value=f"`{skipped_codes}`", inline=True)
+            embed.add_field(name="Already Redeemed", value=f"`{already_redeemed_members}`", inline=True)
+            embed.add_field(name="Failed Member/Codes", value=f"`{failed_member_codes}`", inline=True)
+            embed.add_field(name="Failed Request Attempts", value=f"`{failed_request_attempts}`", inline=True)
+            embed.add_field(name="Final Failed Jobs", value=f"`{final_failed_jobs}`", inline=True)
+            if skipped_code_details:
+                skipped_preview = "\n".join(
+                    f"Code `{code}`: `Code skipped for all members.`"
+                    for code in skipped_code_details[:5]
                 )
-                embed.add_field(name="Codes Found", value=f"`{len(found_codes)}`", inline=True)
-                embed.add_field(name="Members Processed", value=f"`{len(members)}`", inline=True)
-                embed.add_field(name="Succeeded", value=f"`{total_success}`", inline=True)
-                embed.add_field(name="Code Skipped", value=f"`{skipped_codes}`", inline=True)
-                embed.add_field(name="Already Redeemed", value=f"`{already_redeemed_members}`", inline=True)
-                embed.add_field(name="Failed Member/Codes", value=f"`{failed_member_codes}`", inline=True)
-                embed.add_field(name="Failed Request Attempts", value=f"`{failed_request_attempts}`", inline=True)
-                embed.add_field(name="Final Failed Jobs", value=f"`{final_failed_jobs}`", inline=True)
-                if skipped_code_details:
-                    skipped_preview = "\n".join(
-                        f"Code `{code}`: `Code skipped for all members.`"
-                        for code in skipped_code_details[:5]
-                    )
-                    embed.add_field(name="Skipped Codes", value=skipped_preview, inline=False)
-                if failure_details:
-                    preview = "\n".join(
-                        f"FID `{item.get('fid')}`: `{str(item.get('error_reason'))[:80]}`"
-                        for item in failure_details[:5]
-                    )
-                    embed.add_field(name="Failure Details", value=preview, inline=False)
-                await results_channel.send(embed=embed)
+                embed.add_field(name="Skipped Codes", value=skipped_preview, inline=False)
+            if failure_details:
+                preview = "\n".join(
+                    f"FID `{item.get('fid')}`: `{str(item.get('error_reason'))[:80]}`"
+                    for item in failure_details[:5]
+                )
+                embed.add_field(name="Failure Details", value=preview, inline=False)
+            await results_channel.send(embed=embed)
+
+            return {
+                "alliance_id": alliance_id,
+                "alliance_name": name,
+                "codes_found": len(found_codes),
+                "members_processed": len(members),
+                "succeeded": total_success,
+                "skipped_codes": skipped_codes,
+                "already_redeemed_members": already_redeemed_members,
+                "failed_member_codes": failed_member_codes,
+                "failed_request_attempts": failed_request_attempts,
+                "final_failed_jobs": final_failed_jobs,
+                "failure_details": failure_details,
+            }
 
         except Exception as e:
-            print(f"[SCHEDULER] Error in alliance_scheduler: {e}")
+            print(f"[SCHEDULER] Error in _run_alliance_scheduler_once: {e}")
             traceback.print_exc()
+            return None
 
     @alliance_scheduler.before_loop
     async def before_alliance_scheduler(self):
