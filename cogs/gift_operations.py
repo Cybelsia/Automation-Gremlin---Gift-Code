@@ -94,6 +94,38 @@ class GiftOperations(commands.Cog):
         redemption_failure_columns = [column[1] for column in self.gift_operations_cursor.fetchall()]
         if "status" not in redemption_failure_columns:
             self.gift_operations_cursor.execute("ALTER TABLE redemption_failures ADD COLUMN status TEXT")
+
+        # Step 1: unified gift code job tracking.
+        # status values used across steps:
+        #   pending           - found but not yet attempted (transient; usually flips to auto_succeeded or auto_failed_1 immediately)
+        #   auto_failed_1     - failed first automation attempt; retry at next_attempt_at (~24h later)
+        #   auto_succeeded    - automation completed successfully
+        #   needs_manual      - failed automation twice; awaiting a mod
+        #   manual_accepted   - a mod confirmed they applied this code in-game
+        #   manual_rejected   - a mod marked this code as not worth applying / invalid
+        self.gift_operations_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS gift_code_jobs (
+                gift_code TEXT NOT NULL,
+                alliance_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at TEXT,
+                next_attempt_at TEXT,
+                last_error_reason TEXT,
+                completed_at TEXT,
+                completed_by INTEGER,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (gift_code, alliance_id)
+            )
+        """)
+        self.gift_operations_cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gift_code_jobs_status ON gift_code_jobs(status)"
+        )
+        self.gift_operations_cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gift_code_jobs_guild ON gift_code_jobs(guild_id)"
+        )
+
         self.gift_operations_conn.commit()
         
         self.cursor.execute("""
@@ -232,6 +264,73 @@ class GiftOperations(commands.Cog):
         )
         return self.gift_operations_cursor.fetchone() is not None
 
+    # ---- Step 1: gift_code_jobs helpers ----
+
+    def get_gift_code_job(self, gift_code: str, alliance_id: int):
+        """Return the job row for (gift_code, alliance_id), or None if no row exists."""
+        self.gift_operations_cursor.execute(
+            """
+            SELECT gift_code, alliance_id, guild_id, status, attempts,
+                   last_attempt_at, next_attempt_at, last_error_reason,
+                   completed_at, completed_by, created_at
+            FROM gift_code_jobs
+            WHERE gift_code = ? AND alliance_id = ?
+            """,
+            (gift_code, alliance_id),
+        )
+        row = self.gift_operations_cursor.fetchone()
+        if not row:
+            return None
+        columns = [
+            "gift_code", "alliance_id", "guild_id", "status", "attempts",
+            "last_attempt_at", "next_attempt_at", "last_error_reason",
+            "completed_at", "completed_by", "created_at",
+        ]
+        return dict(zip(columns, row))
+
+    def should_skip_code_for_alliance(self, gift_code: str, alliance_id: int) -> bool:
+        """Step 1 rule: if a job row exists at all for this (code, alliance), skip it.
+        Step 2 will refine this to honor next_attempt_at and needs_manual handoff."""
+        return self.get_gift_code_job(gift_code, alliance_id) is not None
+
+    def record_gift_code_job_attempt(
+        self,
+        gift_code: str,
+        alliance_id: int,
+        guild_id: int,
+        status: str,
+        error_reason: str = None,
+    ):
+        """Insert or update the job row for this (code, alliance).
+        Called once per scheduler/on_message attempt so we never re-attempt the same code."""
+        now_iso = datetime.utcnow().isoformat()
+        existing = self.get_gift_code_job(gift_code, alliance_id)
+        if existing is None:
+            self.gift_operations_cursor.execute(
+                """
+                INSERT INTO gift_code_jobs (
+                    gift_code, alliance_id, guild_id, status, attempts,
+                    last_attempt_at, last_error_reason, created_at
+                ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+                """,
+                (gift_code, alliance_id, guild_id, status, now_iso, error_reason, now_iso),
+            )
+        else:
+            self.gift_operations_cursor.execute(
+                """
+                UPDATE gift_code_jobs
+                SET status = ?,
+                    attempts = attempts + 1,
+                    last_attempt_at = ?,
+                    last_error_reason = ?
+                WHERE gift_code = ? AND alliance_id = ?
+                """,
+                (status, now_iso, error_reason, gift_code, alliance_id),
+            )
+        self.gift_operations_conn.commit()
+
+    # ---- end Step 1 helpers ----
+
     @tasks.loop(seconds=60)
     async def alliance_scheduler(self):
         """Runs every 60 seconds. For each alliance, checks if its refresh_rate has elapsed
@@ -290,6 +389,24 @@ class GiftOperations(commands.Cog):
                     print(f"[SCHEDULER] No codes found for alliance_id={alliance_id}")
                     continue
 
+                # Step 1: filter out codes we've already recorded a job for on this alliance.
+                # This stops the bot from re-attempting the same code every cycle.
+                unprocessed_codes = [
+                    c for c in found_codes
+                    if not self.should_skip_code_for_alliance(c, alliance_id)
+                ]
+                skipped_already_processed = len(found_codes) - len(unprocessed_codes)
+                if skipped_already_processed:
+                    print(
+                        f"[SCHEDULER] alliance_id={alliance_id} "
+                        f"skipped_already_processed={skipped_already_processed} "
+                        f"unprocessed_remaining={len(unprocessed_codes)}"
+                    )
+                if not unprocessed_codes:
+                    print(f"[SCHEDULER] alliance_id={alliance_id} all_found_codes_already_processed")
+                    continue
+                found_codes = unprocessed_codes
+
                 # Redeem only for this specific alliance
                 with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
                     users_cursor = users_conn.cursor()
@@ -322,7 +439,15 @@ class GiftOperations(commands.Cog):
                     processed_pairs.add((gift_code, first_fid))
                     print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=starting")
                     ok, result = await self.redeem_gift_code_for_fid(first_fid, gift_code)
+                    # Step 1: record this (code, alliance) so we never retry it on the next tick.
+                    # Step 2 will refine this with 24h retry logic.
                     if ok:
+                        self.record_gift_code_job_attempt(
+                            gift_code=gift_code,
+                            alliance_id=alliance_id,
+                            guild_id=guild_id,
+                            status="auto_succeeded",
+                        )
                         total_success += 1
                         print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=member_redeemed action=continue_member_fanout")
                         member_iterable = members[1:]
@@ -349,6 +474,15 @@ class GiftOperations(commands.Cog):
                         failed_request_attempts += details.get("request_attempts", 1)
                         self.save_redemption_failure(details)
                         failure_details.append(details)
+                        # Step 1: record the failure so we don't retry this same (code, alliance) next tick.
+                        # In Step 2, "auto_failed_1" will get a 24h retry; for now it just blocks re-attempts.
+                        self.record_gift_code_job_attempt(
+                            gift_code=gift_code,
+                            alliance_id=alliance_id,
+                            guild_id=guild_id,
+                            status="auto_failed_1",
+                            error_reason=details.get("error_reason"),
+                        )
                         print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status={status}")
                         print(f"[SCHEDULER-REDEEM-FAIL] {json.dumps(details, ensure_ascii=False)}")
                         await self.send_redemption_failure_summary(guild, results_channel, details)
