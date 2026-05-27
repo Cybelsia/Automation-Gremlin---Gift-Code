@@ -163,6 +163,9 @@ class GiftOperations(commands.Cog):
         self._last_run: dict[int, float] = {}
         self._alliance_scheduler_lock = asyncio.Lock()
         self.redemption_max_attempts = 3
+        # Fix B2: max captcha solve attempts per FID. If WOS rejects with
+        # "captcha check error.", we fetch a fresh captcha and retry up to this many times.
+        self.captcha_max_attempts = 3
         self.redemption_base_backoff = 1
         self.redemption_max_backoff = 30
         self.alliance_scheduler.start()
@@ -1308,36 +1311,69 @@ class GiftOperations(commands.Cog):
             if player_error:
                 return False, self.build_captcha_solver_failed_result(fid, gift_code, redemption_id, player_error)
 
-            captcha_base64, captcha_error = await self.fetch_wos_captcha_image_base64(session, fid_value, headers)
-            if captcha_error:
-                return False, self.build_captcha_solver_failed_result(fid, gift_code, redemption_id, captcha_error)
+            # Fix B2: retry the captcha solve + redeem POST up to captcha_max_attempts times
+            # when WOS rejects with "captcha check error." (2Captcha gave a wrong solution).
+            # Each loop iteration fetches a fresh captcha image - WOS issues a new one per call.
+            last_captcha_result = None
+            for captcha_attempt in range(1, self.captcha_max_attempts + 1):
+                captcha_base64, captcha_error = await self.fetch_wos_captcha_image_base64(session, fid_value, headers)
+                if captcha_error:
+                    return False, self.build_captcha_solver_failed_result(fid, gift_code, redemption_id, captcha_error)
 
-            captcha_solution, solver_error = await self.solve_captcha_with_2captcha(session, captcha_base64)
-            if solver_error or not captcha_solution:
-                return False, self.build_captcha_solver_failed_result(
-                    fid,
-                    gift_code,
-                    redemption_id,
-                    solver_error or "captcha_solver_failed: empty 2Captcha solution",
+                captcha_solution, solver_error = await self.solve_captcha_with_2captcha(session, captcha_base64)
+                if solver_error or not captcha_solution:
+                    return False, self.build_captcha_solver_failed_result(
+                        fid,
+                        gift_code,
+                        redemption_id,
+                        solver_error or "captcha_solver_failed: empty 2Captcha solution",
+                    )
+
+                # Fix B1: generate `time_val` here, AFTER captcha solve, to avoid TIME ERROR.
+                time_val = str(int(datetime.now().timestamp()))
+                form = f"captcha_code={captcha_solution}&cdk={gift_code}&fid={fid_value}&time={time_val}"
+                sign = self.build_wos_form_sign(form)
+                form_data = {"cdk": gift_code, "fid": fid_value, "time": time_val, "sign": sign, "captcha_code": captcha_solution}
+
+                self.log_redemption_request_shape(gift_code, fid, self.wos_giftcode_url, form_data, headers)
+                print(f"[WOS-CAPTCHA-ATTEMPT] fid={fid} code={gift_code} captcha_attempt={captcha_attempt}/{self.captcha_max_attempts}")
+
+                ok, result = await self.request_redemption_with_backoff(
+                    session=session,
+                    fid=fid,
+                    gift_code=gift_code,
+                    form_data=form_data,
+                    headers=headers,
+                    redemption_id=redemption_id,
                 )
+                last_captcha_result = result
 
-            # Fix B1: generate `time_val` here, AFTER captcha solve, to avoid TIME ERROR.
-            # WOS rejects requests where the `time` field drifts too far from server time,
-            # and 2Captcha can easily take 30-60+ seconds to solve.
-            time_val = str(int(datetime.now().timestamp()))
-            form = f"captcha_code={captcha_solution}&cdk={gift_code}&fid={fid_value}&time={time_val}"
-            sign = self.build_wos_form_sign(form)
-            form_data = {"cdk": gift_code, "fid": fid_value, "time": time_val, "sign": sign, "captcha_code": captcha_solution}
+                # Success: return immediately
+                if ok:
+                    if captcha_attempt > 1:
+                        print(f"[WOS-CAPTCHA-RECOVERED] fid={fid} code={gift_code} succeeded_on_attempt={captcha_attempt}")
+                    return ok, result
 
-            self.log_redemption_request_shape(gift_code, fid, self.wos_giftcode_url, form_data, headers)
+                # Was this a captcha-specific rejection? If so, loop and try a fresh captcha.
+                reason = (result.get("error_reason") or "") if isinstance(result, dict) else ""
+                if "Captcha verification failed" in reason:
+                    print(f"[WOS-CAPTCHA-RETRY] fid={fid} code={gift_code} attempt={captcha_attempt} reason='captcha check error' will_retry={captcha_attempt < self.captcha_max_attempts}")
+                    if captcha_attempt < self.captcha_max_attempts:
+                        await asyncio.sleep(1)
+                        continue
+                    # Out of captcha retries - annotate and return
+                    if isinstance(result, dict):
+                        result["error_reason"] = f"Captcha verification failed ({self.captcha_max_attempts} attempts exhausted)"
+                        result["final_error_reason"] = result["error_reason"]
+                    return ok, result
 
-            return await self.request_redemption_with_backoff(
-                session=session,
-                fid=fid,
-                gift_code=gift_code,
-                form_data=form_data,
-                headers=headers,
-                redemption_id=redemption_id,
+                # Any other failure (expired, invalid, already redeemed, rate-limited, etc.)
+                # is not a captcha problem - return without retrying.
+                return ok, result
+
+            # Defensive fall-through (should be unreachable)
+            return False, last_captcha_result or self.build_captcha_solver_failed_result(
+                fid, gift_code, redemption_id, "Captcha retry loop exited unexpectedly"
             )
 
     async def request_redemption_with_backoff(self, session: aiohttp.ClientSession, fid: int, gift_code: str, form_data: dict, headers: dict, redemption_id: str):
