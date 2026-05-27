@@ -8,7 +8,7 @@ from requests.packages.urllib3.util.retry import Retry
 import base64
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import sqlite3
 from discord.ext import tasks
 import asyncio
@@ -166,6 +166,10 @@ class GiftOperations(commands.Cog):
         # Fix B2: max captcha solve attempts per FID. If WOS rejects with
         # "captcha check error.", we fetch a fresh captcha and retry up to this many times.
         self.captcha_max_attempts = 3
+        # Step 2: cooldown before a once-failed automation attempt is retried.
+        # After this window, the scheduler will attempt the code one more time.
+        # If it fails again, the job is promoted to status=needs_manual.
+        self.auto_retry_cooldown_seconds = 24 * 60 * 60  # 24 hours
         self.redemption_base_backoff = 1
         self.redemption_max_backoff = 30
         self.alliance_scheduler.start()
@@ -292,9 +296,42 @@ class GiftOperations(commands.Cog):
         return dict(zip(columns, row))
 
     def should_skip_code_for_alliance(self, gift_code: str, alliance_id: int) -> bool:
-        """Step 1 rule: if a job row exists at all for this (code, alliance), skip it.
-        Step 2 will refine this to honor next_attempt_at and needs_manual handoff."""
-        return self.get_gift_code_job(gift_code, alliance_id) is not None
+        """Decide whether the scheduler should skip this (code, alliance) on the current tick.
+
+        Step 2 rules:
+          - No row at all              -> do not skip (fresh attempt).
+          - auto_succeeded             -> skip (already redeemed).
+          - manual_accepted/rejected   -> skip (mod handled it).
+          - needs_manual               -> skip (mod will handle via manual queue).
+          - auto_failed_1 + cooldown still active  -> skip.
+          - auto_failed_1 + cooldown expired       -> do not skip (eligible for second attempt).
+        """
+        job = self.get_gift_code_job(gift_code, alliance_id)
+        if job is None:
+            return False
+
+        status = job.get("status")
+        terminal_statuses = {"auto_succeeded", "manual_accepted", "manual_rejected", "needs_manual"}
+        if status in terminal_statuses:
+            return True
+
+        if status == "auto_failed_1":
+            next_attempt_at = job.get("next_attempt_at")
+            if not next_attempt_at:
+                # No cooldown recorded; treat as eligible for retry.
+                return False
+            try:
+                next_attempt_dt = datetime.fromisoformat(next_attempt_at)
+            except (TypeError, ValueError):
+                # Corrupt timestamp -> don't block indefinitely, allow retry.
+                return False
+            if datetime.utcnow() >= next_attempt_dt:
+                return False  # cooldown expired, retry is allowed
+            return True  # still cooling down
+
+        # Unknown status: be conservative and skip so we don't accidentally re-spam.
+        print(f"[GIFT-JOB] unknown status='{status}' for code={gift_code} alliance_id={alliance_id}; skipping")
+        return True
 
     def record_gift_code_job_attempt(
         self,
@@ -305,18 +342,52 @@ class GiftOperations(commands.Cog):
         error_reason: str = None,
     ):
         """Insert or update the job row for this (code, alliance).
-        Called once per scheduler/on_message attempt so we never re-attempt the same code."""
-        now_iso = datetime.utcnow().isoformat()
+
+        Step 2 behavior:
+          - First failure (no prior row, status='auto_failed_1') ->
+              save as auto_failed_1, set next_attempt_at = now + cooldown.
+          - Second failure (existing row is auto_failed_1, caller passes auto_failed_1 again) ->
+              promote to needs_manual, clear next_attempt_at.
+          - Success (status='auto_succeeded') -> save as auto_succeeded, clear next_attempt_at.
+        """
+        now = datetime.utcnow()
+        now_iso = now.isoformat()
         existing = self.get_gift_code_job(gift_code, alliance_id)
+
+        # Decide the final status and next_attempt_at based on history.
+        effective_status = status
+        next_attempt_at_value = None
+
+        if status == "auto_failed_1":
+            if existing and existing.get("status") == "auto_failed_1":
+                # Second consecutive failure -> escalate to manual queue.
+                effective_status = "needs_manual"
+                next_attempt_at_value = None
+                print(
+                    f"[GIFT-JOB] code={gift_code} alliance_id={alliance_id} "
+                    f"escalating auto_failed_1 -> needs_manual (second failure)"
+                )
+            else:
+                # First failure -> schedule a single retry in `auto_retry_cooldown_seconds`.
+                next_attempt_dt = now + timedelta(seconds=self.auto_retry_cooldown_seconds)
+                next_attempt_at_value = next_attempt_dt.isoformat()
+                print(
+                    f"[GIFT-JOB] code={gift_code} alliance_id={alliance_id} "
+                    f"recorded auto_failed_1; next_attempt_at={next_attempt_at_value}"
+                )
+
         if existing is None:
             self.gift_operations_cursor.execute(
                 """
                 INSERT INTO gift_code_jobs (
                     gift_code, alliance_id, guild_id, status, attempts,
-                    last_attempt_at, last_error_reason, created_at
-                ) VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+                    last_attempt_at, next_attempt_at, last_error_reason, created_at
+                ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
                 """,
-                (gift_code, alliance_id, guild_id, status, now_iso, error_reason, now_iso),
+                (
+                    gift_code, alliance_id, guild_id, effective_status,
+                    now_iso, next_attempt_at_value, error_reason, now_iso,
+                ),
             )
         else:
             self.gift_operations_cursor.execute(
@@ -325,14 +396,18 @@ class GiftOperations(commands.Cog):
                 SET status = ?,
                     attempts = attempts + 1,
                     last_attempt_at = ?,
+                    next_attempt_at = ?,
                     last_error_reason = ?
                 WHERE gift_code = ? AND alliance_id = ?
                 """,
-                (status, now_iso, error_reason, gift_code, alliance_id),
+                (
+                    effective_status, now_iso, next_attempt_at_value,
+                    error_reason, gift_code, alliance_id,
+                ),
             )
         self.gift_operations_conn.commit()
 
-    # ---- end Step 1 helpers ----
+    # ---- end Step 1 + 2 helpers ----
 
     @tasks.loop(seconds=60)
     async def alliance_scheduler(self):
