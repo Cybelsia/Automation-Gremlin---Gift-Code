@@ -112,6 +112,13 @@ class AdminPanel(commands.Cog):
                 row=3
             ))
             view.add_item(discord.ui.Button(
+                label="Ledger",
+                emoji="📒",
+                style=discord.ButtonStyle.primary,
+                custom_id="ledger",
+                row=4
+            ))
+            view.add_item(discord.ui.Button(
                 label="Main Menu",
                 emoji="🏠",
                 style=discord.ButtonStyle.secondary,
@@ -813,6 +820,21 @@ class AdminPanel(commands.Cog):
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
         # ── Main Menu ─────────────────────────────────────────────
+        # Ledger (bot owner only)
+        elif custom_id == "ledger":
+            if not self.is_owner(interaction.user.id):
+                await interaction.response.send_message(
+                    "❌ Only the bot owner can view the Redemption Ledger.", ephemeral=True
+                )
+                return
+            gift_ops_cog = self.bot.get_cog("GiftOperations")
+            if not gift_ops_cog:
+                await interaction.response.send_message(
+                    "❌ Gift Operations module not found.", ephemeral=True
+                )
+                return
+            await gift_ops_cog.show_ledger_alliance_picker(interaction)
+
         elif custom_id == "main_menu":
             alliance_cog = self.bot.get_cog("Alliance")
             if alliance_cog:

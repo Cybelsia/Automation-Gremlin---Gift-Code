@@ -20,7 +20,7 @@ from .alliance import PaginatedChannelView
 import os
 import traceback
 from .gift_operationsapi import GiftCodeAPI
-from cogs.permissions import check_permission
+from cogs.permissions import check_permission, BOT_OWNER_ID
 from paths import *
 
 class GiftOperations(commands.Cog):
@@ -124,6 +124,40 @@ class GiftOperations(commands.Cog):
         )
         self.gift_operations_cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_gift_code_jobs_guild ON gift_code_jobs(guild_id)"
+        )
+
+        # Step D: per-(alliance, fid, code) redemption ledger.
+        # This is the source of truth for whether a specific FID has already redeemed
+        # a specific code in a specific alliance. Used to skip wasted WOS API calls
+        # at the per-member grain (the existing gift_code_jobs table tracks at the
+        # per-code grain and still drives needs_manual escalation).
+        #
+        # last_status values:
+        #   succeeded         - WOS confirmed the redemption succeeded on a previous attempt
+        #   already_redeemed  - WOS returned code_not_claimable; FID had already redeemed this code
+        #   failed            - last attempt failed for some other reason (see last_error_reason)
+        self.gift_operations_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS gift_code_redemption_ledger (
+                alliance_id INTEGER NOT NULL,
+                fid INTEGER NOT NULL,
+                gift_code TEXT NOT NULL,
+                last_status TEXT NOT NULL,
+                last_error_reason TEXT,
+                last_attempt_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 1,
+                first_attempted_at TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'auto',
+                PRIMARY KEY (alliance_id, fid, gift_code)
+            )
+        """)
+        self.gift_operations_cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ledger_alliance ON gift_code_redemption_ledger(alliance_id)"
+        )
+        self.gift_operations_cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ledger_alliance_code ON gift_code_redemption_ledger(alliance_id, gift_code)"
+        )
+        self.gift_operations_cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ledger_last_attempt ON gift_code_redemption_ledger(last_attempt_at)"
         )
 
         self.gift_operations_conn.commit()
@@ -345,6 +379,122 @@ class GiftOperations(commands.Cog):
                 "last_error_reason": last_error_reason,
                 "created_at": created_at,
             })
+        return results
+
+    # ---- Step D: redemption ledger helpers ----
+
+    def get_ledger_status(self, alliance_id: int, fid: int, gift_code: str):
+        """Return the ledger row for (alliance_id, fid, gift_code), or None.
+
+        Used by both manual and automatic flows before calling WOS. If the returned
+        row has last_status in ('succeeded', 'already_redeemed'), skip the API call.
+        """
+        self.gift_operations_cursor.execute(
+            """
+            SELECT alliance_id, fid, gift_code, last_status, last_error_reason,
+                   last_attempt_at, attempts, first_attempted_at, source
+            FROM gift_code_redemption_ledger
+            WHERE alliance_id = ? AND fid = ? AND gift_code = ?
+            """,
+            (alliance_id, fid, gift_code),
+        )
+        row = self.gift_operations_cursor.fetchone()
+        if not row:
+            return None
+        columns = [
+            "alliance_id", "fid", "gift_code", "last_status", "last_error_reason",
+            "last_attempt_at", "attempts", "first_attempted_at", "source",
+        ]
+        return dict(zip(columns, row))
+
+    def record_ledger_attempt(
+        self,
+        alliance_id: int,
+        fid: int,
+        gift_code: str,
+        status: str,
+        error_reason: str | None,
+        source: str = "auto",
+    ) -> None:
+        """UPSERT a ledger row recording the latest WOS attempt outcome.
+
+        status must be one of: 'succeeded', 'already_redeemed', 'failed'.
+        source is 'auto' (scheduler) or 'manual' (Manual Gift Code button).
+
+        On INSERT: attempts=1, first_attempted_at=now.
+        On UPDATE: attempts incremented; last_* columns overwritten; first_attempted_at preserved.
+        """
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.gift_operations_cursor.execute(
+            """
+            INSERT INTO gift_code_redemption_ledger (
+                alliance_id, fid, gift_code, last_status, last_error_reason,
+                last_attempt_at, attempts, first_attempted_at, source
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(alliance_id, fid, gift_code) DO UPDATE SET
+                last_status = excluded.last_status,
+                last_error_reason = excluded.last_error_reason,
+                last_attempt_at = excluded.last_attempt_at,
+                attempts = gift_code_redemption_ledger.attempts + 1,
+                source = excluded.source
+            """,
+            (alliance_id, fid, gift_code, status, error_reason, now, now, source),
+        )
+        self.gift_operations_conn.commit()
+
+    def get_ledger_for_alliance(self, alliance_id: int):
+        """Return every ledger row for the alliance, most-recent attempt first.
+
+        Used by the owner-only Ledger view in the Admin panel.
+        """
+        self.gift_operations_cursor.execute(
+            """
+            SELECT alliance_id, fid, gift_code, last_status, last_error_reason,
+                   last_attempt_at, attempts, first_attempted_at, source
+            FROM gift_code_redemption_ledger
+            WHERE alliance_id = ?
+            ORDER BY last_attempt_at DESC
+            """,
+            (alliance_id,),
+        )
+        rows = self.gift_operations_cursor.fetchall()
+        columns = [
+            "alliance_id", "fid", "gift_code", "last_status", "last_error_reason",
+            "last_attempt_at", "attempts", "first_attempted_at", "source",
+        ]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def get_alliances_with_ledger_rows(self):
+        """Return [(alliance_id, name, row_count)] for every alliance that has ledger rows.
+
+        Names come from alliance.sqlite (separate DB; merged in Python).
+        Ordered alphabetically by name. Used to populate the Ledger alliance picker.
+        """
+        self.gift_operations_cursor.execute(
+            """
+            SELECT alliance_id, COUNT(*) AS row_count
+            FROM gift_code_redemption_ledger
+            GROUP BY alliance_id
+            """
+        )
+        counts = self.gift_operations_cursor.fetchall()
+        if not counts:
+            return []
+
+        alliance_ids = [row[0] for row in counts]
+        placeholders = ",".join("?" for _ in alliance_ids)
+        self.alliance_cursor.execute(
+            f"SELECT alliance_id, name FROM alliance_list WHERE alliance_id IN ({placeholders})",
+            alliance_ids,
+        )
+        name_lookup = {alliance_id: name for alliance_id, name in self.alliance_cursor.fetchall()}
+
+        results = [
+            (alliance_id, name_lookup.get(alliance_id, f"Alliance {alliance_id}"), row_count)
+            for alliance_id, row_count in counts
+        ]
+        results.sort(key=lambda r: r[1].lower())
         return results
 
     def should_skip_code_for_alliance(self, gift_code: str, alliance_id: int, force_manual: bool = False) -> bool:
@@ -582,6 +732,7 @@ class GiftOperations(commands.Cog):
             skipped_codes = 0
             skipped_code_details = []
             already_redeemed_members = 0
+            from_ledger_count = 0  # Step D: FIDs skipped because ledger already shows succeeded/already_redeemed
             processed_pairs = set()
             for gift_code in found_codes:
                 if self.has_terminal_code_failure(gift_code, alliance_id, guild_id):
@@ -594,69 +745,102 @@ class GiftOperations(commands.Cog):
                     print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=skipped_duplicate_pair")
                     continue
                 processed_pairs.add((gift_code, first_fid))
-                print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=starting")
-                ok, result = await self.redeem_gift_code_for_fid(first_fid, gift_code)
-                # Step 1: record this (code, alliance) so we never retry it on the next tick.
-                # Step 2 will refine this with 24h retry logic.
-                if ok:
+
+                # Step D: per-FID ledger gate. If the ledger says this FID already succeeded
+                # or already_redeemed this code, skip the WOS call and continue to member fanout.
+                first_ledger = self.get_ledger_status(alliance_id, first_fid, gift_code)
+                if first_ledger and first_ledger["last_status"] in ("succeeded", "already_redeemed"):
+                    from_ledger_count += 1
+                    print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=ledger_hit ledger_status={first_ledger['last_status']}")
+                    # Also record this (code, alliance) as auto_succeeded so the code-level skip path agrees.
                     self.record_gift_code_job_attempt(
                         gift_code=gift_code,
                         alliance_id=alliance_id,
                         guild_id=guild_id,
                         status="auto_succeeded",
                     )
-                    total_success += 1
-                    print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=member_redeemed action=continue_member_fanout")
                     member_iterable = members[1:]
                 else:
-                    failed_member_codes += 1
-                    final_failed_jobs += 1
-                    details = result if isinstance(result, dict) else {
-                        "error_reason": str(result),
-                        "gift_code": gift_code,
-                        "fid": first_fid,
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
-                    status = self.classify_redemption_status(details)
-                    if status == "code_not_claimable":
-                        already_redeemed_members += 1
-                    details.update({
-                        "job_type": "scheduled",
-                        "final_state": "job_failed_final" if self.is_code_terminal_status(status) else "member_failed",
-                        "status": status,
-                        "alliance_id": alliance_id,
-                        "alliance_name": name,
-                        "guild_id": guild_id,
-                    })
-                    failed_request_attempts += details.get("request_attempts", 1)
-                    self.save_redemption_failure(details)
-                    failure_details.append(details)
-                    # Step 1: record the failure so we don't retry this same (code, alliance) next tick.
-                    # Step 2: "auto_failed_1" gets a 24h retry; second failure escalates to needs_manual.
-                    self.record_gift_code_job_attempt(
-                        gift_code=gift_code,
-                        alliance_id=alliance_id,
-                        guild_id=guild_id,
-                        status="auto_failed_1",
-                        error_reason=details.get("error_reason"),
-                    )
-                    print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status={status}")
-                    print(f"[SCHEDULER-REDEEM-FAIL] {json.dumps(details, ensure_ascii=False)}")
-                    await self.send_redemption_failure_summary(guild, results_channel, details)
-                    if self.is_code_terminal_status(status):
-                        print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} status={status} action=stop_member_fanout")
-                        await asyncio.sleep(1)
-                        continue
-                    member_iterable = members[1:]
+                    print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=starting")
+                    ok, result = await self.redeem_gift_code_for_fid(first_fid, gift_code)
+                    # Step 1: record this (code, alliance) so we never retry it on the next tick.
+                    # Step 2 will refine this with 24h retry logic.
+                    if ok:
+                        self.record_gift_code_job_attempt(
+                            gift_code=gift_code,
+                            alliance_id=alliance_id,
+                            guild_id=guild_id,
+                            status="auto_succeeded",
+                        )
+                        # Step D: ledger UPSERT
+                        self.record_ledger_attempt(alliance_id, first_fid, gift_code, "succeeded", None, source="auto")
+                        total_success += 1
+                        print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status=member_redeemed action=continue_member_fanout")
+                        member_iterable = members[1:]
+                    else:
+                        failed_member_codes += 1
+                        final_failed_jobs += 1
+                        details = result if isinstance(result, dict) else {
+                            "error_reason": str(result),
+                            "gift_code": gift_code,
+                            "fid": first_fid,
+                            "timestamp": datetime.utcnow().isoformat()
+                        }
+                        status = self.classify_redemption_status(details)
+                        if status == "code_not_claimable":
+                            already_redeemed_members += 1
+                            # Step D: ledger UPSERT (FID had already redeemed it in-game)
+                            self.record_ledger_attempt(alliance_id, first_fid, gift_code, "already_redeemed", details.get("error_reason"), source="auto")
+                        else:
+                            # Step D: ledger UPSERT for the failure
+                            self.record_ledger_attempt(alliance_id, first_fid, gift_code, "failed", details.get("error_reason"), source="auto")
+                        details.update({
+                            "job_type": "scheduled",
+                            "final_state": "job_failed_final" if self.is_code_terminal_status(status) else "member_failed",
+                            "status": status,
+                            "alliance_id": alliance_id,
+                            "alliance_name": name,
+                            "guild_id": guild_id,
+                        })
+                        failed_request_attempts += details.get("request_attempts", 1)
+                        self.save_redemption_failure(details)
+                        failure_details.append(details)
+                        # Step 1: record the failure so we don't retry this same (code, alliance) next tick.
+                        # Step 2: "auto_failed_1" gets a 24h retry; second failure escalates to needs_manual.
+                        self.record_gift_code_job_attempt(
+                            gift_code=gift_code,
+                            alliance_id=alliance_id,
+                            guild_id=guild_id,
+                            status="auto_failed_1",
+                            error_reason=details.get("error_reason"),
+                        )
+                        print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} fid={first_fid} status={status}")
+                        print(f"[SCHEDULER-REDEEM-FAIL] {json.dumps(details, ensure_ascii=False)}")
+                        await self.send_redemption_failure_summary(guild, results_channel, details)
+                        if self.is_code_terminal_status(status):
+                            print(f"[SCHEDULER-FIRST-REDEEM] code={gift_code} status={status} action=stop_member_fanout")
+                            await asyncio.sleep(1)
+                            continue
+                        member_iterable = members[1:]
 
                 for (fid,) in member_iterable:
                     if (gift_code, fid) in processed_pairs:
                         print(f"[SCHEDULER-REDEEM] code={gift_code} fid={fid} status=skipped_duplicate_pair")
                         continue
                     processed_pairs.add((gift_code, fid))
+
+                    # Step D: per-FID ledger gate.
+                    ledger_row = self.get_ledger_status(alliance_id, fid, gift_code)
+                    if ledger_row and ledger_row["last_status"] in ("succeeded", "already_redeemed"):
+                        from_ledger_count += 1
+                        print(f"[SCHEDULER-REDEEM] code={gift_code} fid={fid} status=ledger_hit ledger_status={ledger_row['last_status']}")
+                        continue
+
                     ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
                     if ok:
                         total_success += 1
+                        # Step D: ledger UPSERT
+                        self.record_ledger_attempt(alliance_id, fid, gift_code, "succeeded", None, source="auto")
                         print(f"[SCHEDULER-REDEEM] code={gift_code} fid={fid} status=member_redeemed")
                     else:
                         failed_member_codes += 1
@@ -670,6 +854,11 @@ class GiftOperations(commands.Cog):
                         status = self.classify_redemption_status(details)
                         if status == "code_not_claimable":
                             already_redeemed_members += 1
+                            # Step D: ledger UPSERT (FID had already redeemed it in-game)
+                            self.record_ledger_attempt(alliance_id, fid, gift_code, "already_redeemed", details.get("error_reason"), source="auto")
+                        else:
+                            # Step D: ledger UPSERT for the failure
+                            self.record_ledger_attempt(alliance_id, fid, gift_code, "failed", details.get("error_reason"), source="auto")
                         failed_request_attempts += details.get("request_attempts", 1)
                         details.update({
                             "job_type": "scheduled",
@@ -699,6 +888,7 @@ class GiftOperations(commands.Cog):
             embed.add_field(name="Succeeded", value=f"`{total_success}`", inline=True)
             embed.add_field(name="Code Skipped", value=f"`{skipped_codes}`", inline=True)
             embed.add_field(name="Already Redeemed", value=f"`{already_redeemed_members}`", inline=True)
+            embed.add_field(name="From Ledger", value=f"`{from_ledger_count}`", inline=True)
             embed.add_field(name="Failed Member/Codes", value=f"`{failed_member_codes}`", inline=True)
             embed.add_field(name="Failed Request Attempts", value=f"`{failed_request_attempts}`", inline=True)
             embed.add_field(name="Final Failed Jobs", value=f"`{final_failed_jobs}`", inline=True)
@@ -724,6 +914,7 @@ class GiftOperations(commands.Cog):
                 "succeeded": total_success,
                 "skipped_codes": skipped_codes,
                 "already_redeemed_members": already_redeemed_members,
+                "from_ledger": from_ledger_count,
                 "failed_member_codes": failed_member_codes,
                 "failed_request_attempts": failed_request_attempts,
                 "final_failed_jobs": final_failed_jobs,
@@ -956,6 +1147,70 @@ class GiftOperations(commands.Cog):
             return
 
         await interaction.response.send_modal(CreateGiftCodeModal(self))
+
+    async def show_ledger_alliance_picker(self, interaction: discord.Interaction):
+        """Step D: owner-only entry point for the Redemption Ledger.
+
+        Called from the Admin panel's 'Ledger' button. Bot-owner-only.
+        Shows an alliance picker; pick one to open the paginated ledger view.
+        """
+        if interaction.user.id != BOT_OWNER_ID:
+            try:
+                await interaction.response.send_message(
+                    "❌ Only the bot owner can view the Redemption Ledger.", ephemeral=True
+                )
+            except discord.InteractionResponded:
+                await interaction.followup.send(
+                    "❌ Only the bot owner can view the Redemption Ledger.", ephemeral=True
+                )
+            return
+
+        try:
+            alliances_with_rows = self.get_alliances_with_ledger_rows()
+        except Exception as exc:
+            print(f"[ERROR] show_ledger_alliance_picker: failed to load ledger alliances: {exc}")
+            traceback.print_exc()
+            embed = discord.Embed(
+                title="❌ Could Not Load Ledger",
+                description=f"Something went wrong reading the ledger:\n```{str(exc)[:900]}```",
+                color=discord.Color.red(),
+            )
+            if not interaction.response.is_done():
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        if not alliances_with_rows:
+            embed = discord.Embed(
+                title="📒 Redemption Ledger",
+                description=(
+                    "📦 The ledger is empty.\n\n"
+                    "As soon as the scheduler or Manual Gift Code runs against any alliance, "
+                    "per-FID redemption history will start landing here."
+                ),
+                color=discord.Color.blurple(),
+            )
+            if not interaction.response.is_done():
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="📒 Redemption Ledger — Select Alliance",
+            description=(
+                "Pick an alliance to view its per-FID redemption history.\n\n"
+                "Each row tracks one `(alliance, FID, code)` triple: status, last attempt, "
+                "last error reason, total attempts, and source (auto / manual)."
+            ),
+            color=discord.Color.blurple(),
+        )
+        view = LedgerAllianceSelectView(self, alliances_with_rows)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     async def show_auto_gift_settings(self, interaction: discord.Interaction):
         if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
@@ -1785,6 +2040,7 @@ class GiftOperations(commands.Cog):
         success_count = 0
         already_redeemed_count = 0
         already_processed_count = 0
+        from_ledger_count = 0  # Step D: FIDs skipped because ledger already shows succeeded/already_redeemed
         failed = []
         processed_pairs = set()
 
@@ -1797,13 +2053,28 @@ class GiftOperations(commands.Cog):
 
             processed_pairs.add(pair_key)
 
+            # Step D: per-FID ledger gate.
+            ledger_row = self.get_ledger_status(alliance_id, fid, gift_code)
+            if ledger_row and ledger_row["last_status"] in ("succeeded", "already_redeemed"):
+                from_ledger_count += 1
+                print(f"[MANUAL-REDEEM] code={gift_code} fid={fid} status=ledger_hit ledger_status={ledger_row['last_status']}")
+                continue
+
             ok, result = await self.redeem_gift_code_for_fid(fid, gift_code)
             if ok:
                 success_count += 1
+                # Step D: ledger UPSERT
+                self.record_ledger_attempt(alliance_id, fid, gift_code, "succeeded", None, source="manual")
             else:
                 status_value = str(result.get("status") or "unknown") if isinstance(result, dict) else "unknown"
+                error_reason = str(result.get("error_reason")) if isinstance(result, dict) else str(result)
                 if status_value == "code_not_claimable":
                     already_redeemed_count += 1
+                    # Step D: ledger UPSERT (FID had already redeemed it in-game)
+                    self.record_ledger_attempt(alliance_id, fid, gift_code, "already_redeemed", error_reason, source="manual")
+                else:
+                    # Step D: ledger UPSERT for the failure
+                    self.record_ledger_attempt(alliance_id, fid, gift_code, "failed", error_reason, source="manual")
                 failed.append((fid, result))
             await asyncio.sleep(1)
 
@@ -1815,6 +2086,7 @@ class GiftOperations(commands.Cog):
         embed.add_field(name="Total Members", value=f"`{len(members)}`", inline=True)
         embed.add_field(name="Succeeded", value=f"`{success_count}`", inline=True)
         embed.add_field(name="Already Redeemed", value=f"`{already_redeemed_count}`", inline=True)
+        embed.add_field(name="From Ledger", value=f"`{from_ledger_count}`", inline=True)
         embed.add_field(name="Already Processed", value=f"`{already_processed_count}`", inline=True)
         embed.add_field(name="Failed", value=f"`{len(failed)}`", inline=True)
 
@@ -2115,6 +2387,7 @@ class RetryAutomaticRedemptionAllianceSelect(discord.ui.Select):
         embed.add_field(name="Succeeded", value=f"`{summary.get('succeeded', 0)}`", inline=True)
         embed.add_field(name="Code Skipped", value=f"`{summary.get('skipped_codes', 0)}`", inline=True)
         embed.add_field(name="Already Redeemed", value=f"`{summary.get('already_redeemed_members', 0)}`", inline=True)
+        embed.add_field(name="From Ledger", value=f"`{summary.get('from_ledger', 0)}`", inline=True)
         embed.add_field(name="Failed Member/Codes", value=f"`{summary.get('failed_member_codes', 0)}`", inline=True)
         embed.add_field(name="Final Failed Jobs", value=f"`{final_failed}`", inline=True)
         failure_details = summary.get("failure_details") or []
@@ -2206,6 +2479,146 @@ class ListManualCodesView(discord.ui.View):
             color=discord.Color.blurple(),
         )
         await interaction.response.edit_message(embed=embed, view=GiftMenuView(self.cog))
+
+
+class LedgerAllianceSelectView(discord.ui.View):
+    """Step D: alliance picker for the owner-only Redemption Ledger."""
+    def __init__(self, cog, alliances_with_rows):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.add_item(LedgerAllianceSelect(cog, alliances_with_rows))
+
+
+class LedgerAllianceSelect(discord.ui.Select):
+    def __init__(self, cog, alliances_with_rows):
+        self.cog = cog
+        # alliances_with_rows is [(alliance_id, name, row_count)] sorted by name
+        self.alliance_names = {str(aid): name for aid, name, _ in alliances_with_rows[:25]}
+        options = [
+            discord.SelectOption(
+                label=f"{name}"[:100],
+                value=str(alliance_id),
+                description=f"{row_count} ledger row{'s' if row_count != 1 else ''}"[:100],
+            )
+            for alliance_id, name, row_count in alliances_with_rows[:25]
+        ]
+        super().__init__(
+            placeholder="Select an alliance",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        # Re-check owner gate in case the select gets bounced around.
+        if interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message(
+                "❌ Only the bot owner can view the Redemption Ledger.", ephemeral=True
+            )
+            return
+        alliance_id = int(self.values[0])
+        alliance_name = self.alliance_names.get(self.values[0], f"Alliance {alliance_id}")
+        try:
+            rows = self.cog.get_ledger_for_alliance(alliance_id)
+        except Exception as exc:
+            print(f"[ERROR] LedgerAllianceSelect.callback: failed to load ledger rows: {exc}")
+            traceback.print_exc()
+            embed = discord.Embed(
+                title="❌ Could Not Load Ledger",
+                description=f"Something went wrong reading the ledger:\n```{str(exc)[:900]}```",
+                color=discord.Color.red(),
+            )
+            await interaction.response.edit_message(embed=embed, view=None)
+            return
+
+        if not rows:
+            embed = discord.Embed(
+                title=f"📒 Redemption Ledger — {alliance_name}",
+                description="This alliance has no ledger rows yet.",
+                color=discord.Color.blurple(),
+            )
+            await interaction.response.edit_message(embed=embed, view=None)
+            return
+
+        view = LedgerView(self.cog, alliance_id, alliance_name, rows)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+
+class LedgerView(discord.ui.View):
+    """Step D: paginated, owner-only browse of the redemption ledger for one alliance."""
+
+    PAGE_SIZE = 10
+
+    def __init__(self, cog, alliance_id, alliance_name, rows):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+        self.rows = rows
+        self.page = 0
+        self.total_pages = max(1, (len(rows) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        self._refresh_button_state()
+
+    def _refresh_button_state(self):
+        self.previous_button.disabled = self.page <= 0
+        self.next_button.disabled = self.page >= self.total_pages - 1
+
+    def build_embed(self) -> discord.Embed:
+        start = self.page * self.PAGE_SIZE
+        end = start + self.PAGE_SIZE
+        page_rows = self.rows[start:end]
+
+        embed = discord.Embed(
+            title=f"📒 Redemption Ledger — {self.alliance_name}",
+            description=(
+                f"Showing **{start + 1}–{start + len(page_rows)}** of **{len(self.rows)}** ledger rows.\n"
+                "One row per `(FID, code)` pair. Most recent attempt first."
+            ),
+            color=discord.Color.blurple(),
+        )
+
+        for row in page_rows:
+            status = row.get("last_status") or "unknown"
+            attempts = row.get("attempts", 0)
+            last_attempt_at = row.get("last_attempt_at") or "never"
+            source = row.get("source") or "auto"
+            reason = (row.get("last_error_reason") or "").strip()
+            if reason and len(reason) > 160:
+                reason = reason[:157] + "..."
+            reason_line = f"\nLast error: `{reason}`" if reason else ""
+            field_value = (
+                f"FID: `{row['fid']}`\n"
+                f"Status: `{status}` · Attempts: `{attempts}` · Source: `{source}`\n"
+                f"Last attempt: `{last_attempt_at}`{reason_line}"
+            )
+            embed.add_field(
+                name=f"`{row['gift_code']}`",
+                value=field_value,
+                inline=False,
+            )
+
+        embed.set_footer(text=f"Page {self.page + 1} of {self.total_pages} · Bot-owner view")
+        return embed
+
+    @discord.ui.button(label="Previous", emoji="⬅️", style=discord.ButtonStyle.secondary, row=0)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message("❌ Bot owner only.", ephemeral=True)
+            return
+        if self.page > 0:
+            self.page -= 1
+        self._refresh_button_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Next", emoji="➡️", style=discord.ButtonStyle.secondary, row=0)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != BOT_OWNER_ID:
+            await interaction.response.send_message("❌ Bot owner only.", ephemeral=True)
+            return
+        if self.page < self.total_pages - 1:
+            self.page += 1
+        self._refresh_button_state()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
 
 class AutoGiftSettingsView(discord.ui.View):
