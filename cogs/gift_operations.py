@@ -789,22 +789,24 @@ class GiftOperations(commands.Cog):
 
     async def show_gift_menu(self, interaction: discord.Interaction):
         gift_menu_embed = discord.Embed(
-            title="🎁 Gift Redemption",
+            title="🎁 Gift Code Operations",
             description=(
                 "Please select an operation:\n\n"
                 "**Available Operations**\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 "✍️ **Manual Gift Code**\n"
                 "└ Enter a gift code and redeem it for each FID in the selected alliance\n\n"
-                "� **Scan Last 5 Codes**\n"
+                "🔁 **Retry Automatic Redemption**\n"
+                "└ Force the scheduler to re-attempt redemption for a chosen alliance now\n\n"
+                "📋 **List Manual Codes**\n"
+                "└ Show every code that failed automation twice and is awaiting mod review\n\n"
+                "🔍 **Scan Last 5 Codes**\n"
                 "└ Scan backward until 5 valid gift codes are found, then redeem each code for each FID once\n\n"
-                "⏱️ **Scheduled Redemption**\n"
-                "└ Configure scheduled gift code scanning and redemption intervals\n\n"
                 "━━━━━━━━━━━━━━━━━━━━━━"
             ),
             color=discord.Color.gold()
         )
-        
+
         view = GiftMenuView(self)
         await interaction.response.edit_message(embed=gift_menu_embed, view=view)
 
@@ -1787,22 +1789,31 @@ class GiftMenuView(discord.ui.View):
         super().__init__(timeout=300)
         self.cog = cog
 
-    async def _not_configured(self, interaction: discord.Interaction, operation: str):
-        await interaction.response.send_message(f"❌ {operation} is not configured in this build.", ephemeral=True)
-
     @discord.ui.button(label="Manual Gift Code", emoji="✍️", style=discord.ButtonStyle.primary, row=0)
     async def manual_gift_code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_create_gift_code_modal(interaction)
 
-    @discord.ui.button(label="Scan Last 5 Codes", emoji="�", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Retry Automatic Redemption", emoji="🔁", style=discord.ButtonStyle.primary, row=0)
+    async def retry_automatic_redemption_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "🚧 Retry Automatic Redemption is coming in the next step. "
+            "This will let you pick one alliance and force the scheduler to re-attempt its eligible codes.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="List Manual Codes", emoji="📋", style=discord.ButtonStyle.primary, row=0)
+    async def list_manual_codes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "🚧 List Manual Codes is coming in the next step. "
+            "This will show every code that failed automation twice and now needs a mod to accept or reject it.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Scan Last 5 Codes", emoji="🔍", style=discord.ButtonStyle.secondary, row=1)
     async def scan_last_5_codes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_auto_gift_settings(interaction)
 
-    @discord.ui.button(label="Scheduled Redemption", emoji="⏱️", style=discord.ButtonStyle.primary, row=1)
-    async def scheduled_redemption_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.show_auto_gift_settings(interaction)
-
-    @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=1)
     async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         alliance_cog = self.cog.bot.get_cog("Alliance")
         if alliance_cog:
