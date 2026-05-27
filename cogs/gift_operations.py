@@ -1283,9 +1283,12 @@ class GiftOperations(commands.Cog):
         )
 
     async def redeem_gift_code_for_fid(self, fid: int, gift_code: str):
-        time_val = str(int(datetime.now().timestamp()))
+        # NOTE: redemption_id uses the START timestamp for a stable identifier.
+        # The actual `time` value sent to WOS is generated fresh right before
+        # the POST (after captcha solve) to avoid TIME ERROR from stale timestamps.
+        start_time_val = str(int(datetime.now().timestamp()))
         fid_value = str(fid)
-        redemption_id = f"{gift_code}:{fid}:{time_val}"
+        redemption_id = f"{gift_code}:{fid}:{start_time_val}"
         headers = self.build_wos_headers()
 
         ssl_context = ssl.create_default_context()
@@ -1318,6 +1321,10 @@ class GiftOperations(commands.Cog):
                     solver_error or "captcha_solver_failed: empty 2Captcha solution",
                 )
 
+            # Fix B1: generate `time_val` here, AFTER captcha solve, to avoid TIME ERROR.
+            # WOS rejects requests where the `time` field drifts too far from server time,
+            # and 2Captcha can easily take 30-60+ seconds to solve.
+            time_val = str(int(datetime.now().timestamp()))
             form = f"captcha_code={captcha_solution}&cdk={gift_code}&fid={fid_value}&time={time_val}"
             sign = self.build_wos_form_sign(form)
             form_data = {"cdk": gift_code, "fid": fid_value, "time": time_val, "sign": sign, "captcha_code": captcha_solution}
