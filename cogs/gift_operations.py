@@ -1513,6 +1513,111 @@ class GiftOperations(commands.Cog):
 
     # ---- end Step E helpers ----
 
+    # ---- Step F: button-triggered redemption ephemeral indicators ----
+
+    def get_alliance_report_channel(self, alliance_id, guild):
+        """Step F: resolve where the full embed report should land for one alliance.
+
+        Mirrors the fallback in _run_alliance_scheduler_once line 683:
+        results_channel_id > gift_code_channel_id > None.
+
+        Returns (channel_or_none, source) where source is one of:
+          'results' - resolved from results_channel_id
+          'gift_fallback' - resolved from gift_code_channel_id (results not set)
+          'unset' - no channel ids set at all
+          'not_found' - channel id set but Discord couldn't find the channel
+        """
+        if guild is None:
+            return None, "unset"
+        self.alliance_cursor.execute(
+            "SELECT gift_code_channel_id, results_channel_id FROM alliance_list WHERE alliance_id = ?",
+            (alliance_id,),
+        )
+        row = self.alliance_cursor.fetchone()
+        if not row:
+            return None, "unset"
+        gift_channel_id, results_channel_id = row
+        if results_channel_id:
+            channel = guild.get_channel(results_channel_id)
+            return (channel, "results") if channel else (None, "not_found")
+        if gift_channel_id:
+            channel = guild.get_channel(gift_channel_id)
+            return (channel, "gift_fallback") if channel else (None, "not_found")
+        return None, "unset"
+
+    @staticmethod
+    def build_kickoff_embed(action_label, alliance_name, report_channel, report_source):
+        """Step F: short ephemeral 'I ran' pulse shown immediately after the button is clicked."""
+        if report_channel is not None:
+            channel_ref = f"<#{report_channel.id}>"
+            if report_source == "gift_fallback":
+                channel_note = (
+                    f"⚠️ No report channel is set for this alliance — falling back to the gift code channel ({channel_ref}). "
+                    "Set a dedicated report channel under Other Features → Automatic Redemption Settings."
+                )
+            else:
+                channel_note = f"Full report will land in {channel_ref}."
+        else:
+            channel_note = (
+                "⚠️ No report channel is set for this alliance — "
+                "the full report will be sent back to you here instead. "
+                "Set one under Other Features → Automatic Redemption Settings."
+            )
+        embed = discord.Embed(
+            title=f"▶️ {action_label} — Started",
+            description=f"Alliance: **{alliance_name}**\n{channel_note}",
+            color=discord.Color.blurple(),
+        )
+        return embed
+
+    @staticmethod
+    def build_completion_embed(action_label, alliance_name, succeeded, failed, skipped, already_redeemed, report_channel, report_source, extra_note=None):
+        """Step F: short colored 'it worked / didn't work / was skipped' ephemeral summary.
+
+        Outcome rules:
+          - any failed > 0  : orange ("⚠️ mixed" or "❌ didn't work" if 0 succeeded)
+          - succeeded > 0   : green ("✅ it worked")
+          - everything 0 except skipped/already : grey ("⏭️ nothing to do")
+          - everything 0    : grey ("ℹ️ no work performed")
+        """
+        if failed > 0 and succeeded == 0:
+            icon, title_suffix, color = "❌", "Didn't work", discord.Color.red()
+        elif failed > 0:
+            icon, title_suffix, color = "⚠️", "Partial success", discord.Color.orange()
+        elif succeeded > 0:
+            icon, title_suffix, color = "✅", "It worked", discord.Color.green()
+        elif skipped > 0 or already_redeemed > 0:
+            icon, title_suffix, color = "⏭️", "Nothing to do", discord.Color.dark_grey()
+        else:
+            icon, title_suffix, color = "ℹ️", "No work performed", discord.Color.dark_grey()
+
+        if report_channel is not None:
+            channel_ref = f"<#{report_channel.id}>"
+            if report_source == "gift_fallback":
+                report_note = f"Full details in {channel_ref} (gift code channel — no dedicated report channel set)."
+            else:
+                report_note = f"Full details in {channel_ref}."
+        else:
+            report_note = "Full details sent to you in this channel (no report channel set)."
+
+        embed = discord.Embed(
+            title=f"{icon} {action_label} — {title_suffix}",
+            description=(
+                f"Alliance: **{alliance_name}**\n"
+                f" • Succeeded: `{succeeded}`\n"
+                f" • Failed: `{failed}`\n"
+                f" • Skipped: `{skipped}`\n"
+                f" • Already Redeemed: `{already_redeemed}`\n\n"
+                f"{report_note}"
+            ),
+            color=color,
+        )
+        if extra_note:
+            embed.set_footer(text=extra_note[:2048])
+        return embed
+
+    # ---- end Step F helpers ----
+
     async def show_auto_gift_settings(self, interaction: discord.Interaction):
         if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
             await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
@@ -2329,6 +2434,20 @@ class GiftOperations(commands.Cog):
             await interaction.followup.send("❌ This can only be used in a server.", ephemeral=True)
             return
 
+        # Step F: kickoff ephemeral. Resolve where the full report will land first so we can
+        # tell the clicker. Falls back gracefully if anything goes sideways.
+        report_channel = None
+        report_source = "unset"
+        try:
+            report_channel, report_source = self.get_alliance_report_channel(alliance_id, interaction.guild)
+        except Exception as _exc_step_f:
+            print(f"[STEP-F] manual: failed to resolve report channel for alliance_id={alliance_id}: {_exc_step_f}")
+        try:
+            kickoff_embed = self.build_kickoff_embed("Manual Gift Code", alliance_name, report_channel, report_source)
+            await interaction.followup.send(embed=kickoff_embed, ephemeral=True)
+        except Exception as _exc_step_f:
+            print(f"[STEP-F] manual: kickoff ephemeral failed: {_exc_step_f}")
+
         with sqlite3.connect(database_path(USERS_DB, 'users.sqlite')) as users_conn:
             users_cursor = users_conn.cursor()
             users_cursor.execute("SELECT fid FROM users WHERE alliance = ?", (alliance_id,))
@@ -2395,7 +2514,35 @@ class GiftOperations(commands.Cog):
             failed_preview = "\n".join(f"FID {fid}: {reason}" for fid, reason in failed[:10])
             embed.add_field(name="Failures", value=failed_preview, inline=False)
 
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        # Step F: post the full embed to the alliance's report channel (or fall back to
+        # the gift code channel). If neither is set, fall back to ephemeral to the user.
+        full_embed_posted_to_channel = False
+        if report_channel is not None:
+            try:
+                await report_channel.send(embed=embed)
+                full_embed_posted_to_channel = True
+            except Exception as _exc_step_f:
+                print(f"[STEP-F] manual: failed to post full embed to report channel {getattr(report_channel, 'id', '?')}: {_exc_step_f}")
+
+        # Step F: completion ephemeral summary to the user who clicked.
+        try:
+            completion_embed = self.build_completion_embed(
+                action_label="Manual Gift Code",
+                alliance_name=alliance_name,
+                succeeded=success_count,
+                failed=len(failed),
+                skipped=already_processed_count,
+                already_redeemed=already_redeemed_count + from_ledger_count,
+                report_channel=report_channel if full_embed_posted_to_channel else None,
+                report_source=report_source if full_embed_posted_to_channel else "unset",
+            )
+            await interaction.followup.send(embed=completion_embed, ephemeral=True)
+        except Exception as _exc_step_f:
+            print(f"[STEP-F] manual: completion ephemeral failed: {_exc_step_f}")
+
+        # Step F: only fall back to ephemeral full embed if we couldn't deliver it to a channel.
+        if not full_embed_posted_to_channel:
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
 
     async def show_redeem_diagnostics_menu(self, interaction: discord.Interaction):
@@ -2648,6 +2795,21 @@ class RetryAutomaticRedemptionAllianceSelect(discord.ui.Select):
         alliance_name = self.alliance_names.get(self.values[0], f"Alliance {alliance_id}")
         await interaction.response.defer(ephemeral=True, thinking=True)
 
+        # Step F: kickoff ephemeral. The full embed gets posted to the report channel by
+        # _run_alliance_scheduler_once (line 907) during the run — we only need to tell the
+        # user that we're running and where to look afterwards.
+        report_channel = None
+        report_source = "unset"
+        try:
+            report_channel, report_source = self.cog.get_alliance_report_channel(alliance_id, interaction.guild)
+        except Exception as _exc_step_f:
+            print(f"[STEP-F] retry: failed to resolve report channel for alliance_id={alliance_id}: {_exc_step_f}")
+        try:
+            kickoff_embed = self.cog.build_kickoff_embed("Retry Automatic Redemption", alliance_name, report_channel, report_source)
+            await interaction.followup.send(embed=kickoff_embed, ephemeral=True)
+        except Exception as _exc_step_f:
+            print(f"[STEP-F] retry: kickoff ephemeral failed: {_exc_step_f}")
+
         summary = await self.cog.force_run_scheduler_for_alliance(alliance_id)
 
         if summary is None:
@@ -2669,37 +2831,59 @@ class RetryAutomaticRedemptionAllianceSelect(discord.ui.Select):
             return
 
         if "info" in summary:
-            embed = discord.Embed(
-                title="🔁 Retry Automatic Redemption",
-                description=f"Alliance: `{alliance_name}`\n\n{summary['info']}",
-                color=discord.Color.blurple(),
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            # Step F: nothing-to-do path — use the short colored ephemeral.
+            try:
+                short_embed = self.cog.build_completion_embed(
+                    action_label="Retry Automatic Redemption",
+                    alliance_name=summary.get("alliance_name", alliance_name),
+                    succeeded=0,
+                    failed=0,
+                    skipped=0,
+                    already_redeemed=0,
+                    report_channel=None,  # nothing posted to the report channel on this path
+                    report_source="unset",
+                    extra_note=summary["info"][:1900],
+                )
+                await interaction.followup.send(embed=short_embed, ephemeral=True)
+            except Exception as _exc_step_f:
+                print(f"[STEP-F] retry: info-path ephemeral failed: {_exc_step_f}")
+                fallback = discord.Embed(
+                    title="🔁 Retry Automatic Redemption",
+                    description=f"Alliance: `{alliance_name}`\n\n{summary['info']}",
+                    color=discord.Color.blurple(),
+                )
+                await interaction.followup.send(embed=fallback, ephemeral=True)
             return
 
+        # Step F: success / mixed / failed path. The full embed already went to the report
+        # channel inside _run_alliance_scheduler_once. We send the short colored summary here.
         final_failed = summary.get("final_failed_jobs", 0)
-        embed = discord.Embed(
-            title="🔁 Retry Automatic Redemption",
-            description=f"Alliance: `{summary.get('alliance_name', alliance_name)}`",
-            color=discord.Color.green() if final_failed == 0 else discord.Color.orange(),
-        )
-        embed.add_field(name="Codes Found", value=f"`{summary.get('codes_found', 0)}`", inline=True)
-        embed.add_field(name="Members Processed", value=f"`{summary.get('members_processed', 0)}`", inline=True)
-        embed.add_field(name="Succeeded", value=f"`{summary.get('succeeded', 0)}`", inline=True)
-        embed.add_field(name="Code Skipped", value=f"`{summary.get('skipped_codes', 0)}`", inline=True)
-        embed.add_field(name="Already Redeemed", value=f"`{summary.get('already_redeemed_members', 0)}`", inline=True)
-        embed.add_field(name="From Ledger", value=f"`{summary.get('from_ledger', 0)}`", inline=True)
-        embed.add_field(name="Failed Member/Codes", value=f"`{summary.get('failed_member_codes', 0)}`", inline=True)
-        embed.add_field(name="Final Failed Jobs", value=f"`{final_failed}`", inline=True)
-        failure_details = summary.get("failure_details") or []
-        if failure_details:
-            preview = "\n".join(
-                f"FID `{item.get('fid')}`: `{str(item.get('error_reason'))[:80]}`"
-                for item in failure_details[:5]
+        try:
+            short_embed = self.cog.build_completion_embed(
+                action_label="Retry Automatic Redemption",
+                alliance_name=summary.get("alliance_name", alliance_name),
+                succeeded=summary.get("succeeded", 0),
+                failed=summary.get("failed_member_codes", 0),
+                skipped=summary.get("skipped_codes", 0),
+                already_redeemed=summary.get("already_redeemed_members", 0) + summary.get("from_ledger", 0),
+                report_channel=report_channel,
+                report_source=report_source,
+                extra_note=(
+                    f"Codes Found: {summary.get('codes_found', 0)} • "
+                    f"Members Processed: {summary.get('members_processed', 0)} • "
+                    f"Final Failed Jobs: {final_failed}"
+                ),
             )
-            embed.add_field(name="Failure Details", value=preview, inline=False)
-        embed.set_footer(text="Cooldown bypassed: auto_failed_1 codes were retried. Failures escalate to needs_manual.")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=short_embed, ephemeral=True)
+        except Exception as _exc_step_f:
+            print(f"[STEP-F] retry: completion ephemeral failed: {_exc_step_f}")
+            # Last-resort fallback so the user still gets something.
+            fallback = discord.Embed(
+                title="🔁 Retry Automatic Redemption — Done",
+                description=f"Alliance: `{summary.get('alliance_name', alliance_name)}`\n\nCheck the report channel for the full report.",
+                color=discord.Color.green() if final_failed == 0 else discord.Color.orange(),
+            )
+            await interaction.followup.send(embed=fallback, ephemeral=True)
 
 
 class ListManualCodesView(discord.ui.View):
