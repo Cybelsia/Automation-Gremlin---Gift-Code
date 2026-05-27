@@ -305,11 +305,34 @@ class OtherFeaturesView(discord.ui.View):
         await gift_cog.show_redeem_diagnostics_menu(interaction)
 
     @discord.ui.button(
+        label="Automatic Redemption Settings",
+        emoji="⚙️",
+        style=discord.ButtonStyle.primary,
+        custom_id="automatic_redemption_settings",
+        row=3
+    )
+    async def automatic_redemption_settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Step E: per-alliance Automatic Redemption Settings (Other Features entry point).
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can change Automatic Redemption Settings.",
+                ephemeral=True,
+            )
+            return
+        gift_cog = self.cog.bot.get_cog("GiftOperations")
+        if not gift_cog:
+            await interaction.response.send_message(
+                "❌ Gift Operations module not found.", ephemeral=True
+            )
+            return
+        await gift_cog.show_auto_redemption_settings_picker(interaction)
+
+    @discord.ui.button(
         label="Main Menu",
         emoji="🏠",
         style=discord.ButtonStyle.secondary,
         custom_id="main_menu",
-        row=3
+        row=4
     )
     async def main_menu_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:

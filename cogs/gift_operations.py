@@ -1212,6 +1212,307 @@ class GiftOperations(commands.Cog):
         else:
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
+    # ---- Step E: Automatic Redemption Settings (per-alliance) ----
+
+    AUTO_REFRESH_RATE_PRESETS = [
+        ("1 day", 86400),
+        ("2 days", 172800),
+        ("3 days", 259200),
+        ("5 days", 432000),
+        ("7 days", 604800),
+        ("14 days", 1209600),
+        ("28 days", 2419200),
+    ]
+
+    @staticmethod
+    def format_refresh_rate_seconds(seconds):
+        """Step E: human-readable rendering of refresh_rate. Non-destructive helper."""
+        if seconds is None:
+            return "`Not set`"
+        try:
+            seconds = int(seconds)
+        except (TypeError, ValueError):
+            return f"`{seconds}`"
+        if seconds <= 0:
+            return "`Disabled (0)`"
+        for label, value in GiftOperations.AUTO_REFRESH_RATE_PRESETS:
+            if value == seconds:
+                return f"**{label}** ({seconds}s)"
+        # Fall back to a coarse day/hour/minute breakdown so legacy values still display.
+        days, rem = divmod(seconds, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes = rem // 60
+        parts = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        if not parts:
+            parts.append(f"{seconds}s")
+        return f"{' '.join(parts)} ({seconds}s)"
+
+    def get_auto_redemption_alliances(self, guild_id):
+        """Step E: list alliances for this guild with their current automatic-flow settings.
+
+        Returns list of dicts sorted by name. Read-only.
+        """
+        self.alliance_cursor.execute(
+            """
+            SELECT alliance_id, name, gift_code_channel_id, results_channel_id, refresh_rate
+            FROM alliance_list
+            WHERE discord_server_id = ?
+            ORDER BY name
+            """,
+            (guild_id,),
+        )
+        rows = self.alliance_cursor.fetchall()
+        return [
+            {
+                "alliance_id": row[0],
+                "name": row[1],
+                "gift_code_channel_id": row[2],
+                "results_channel_id": row[3],
+                "refresh_rate": row[4],
+            }
+            for row in rows
+        ]
+
+    def get_auto_redemption_alliance(self, alliance_id):
+        """Step E: fetch one alliance's current automatic-flow settings. Read-only."""
+        self.alliance_cursor.execute(
+            """
+            SELECT alliance_id, name, gift_code_channel_id, results_channel_id, refresh_rate
+            FROM alliance_list
+            WHERE alliance_id = ?
+            """,
+            (alliance_id,),
+        )
+        row = self.alliance_cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "alliance_id": row[0],
+            "name": row[1],
+            "gift_code_channel_id": row[2],
+            "results_channel_id": row[3],
+            "refresh_rate": row[4],
+        }
+
+    def set_alliance_gift_code_channel(self, alliance_id, channel_id):
+        """Step E: write only this one field. Non-destructive update."""
+        self.alliance_cursor.execute(
+            "UPDATE alliance_list SET gift_code_channel_id = ? WHERE alliance_id = ?",
+            (channel_id, alliance_id),
+        )
+        self.alliance_conn.commit()
+
+    def set_alliance_results_channel(self, alliance_id, channel_id):
+        """Step E: write only this one field. Non-destructive update."""
+        self.alliance_cursor.execute(
+            "UPDATE alliance_list SET results_channel_id = ? WHERE alliance_id = ?",
+            (channel_id, alliance_id),
+        )
+        self.alliance_conn.commit()
+
+    def set_alliance_refresh_rate(self, alliance_id, refresh_seconds):
+        """Step E: write only this one field. Non-destructive update."""
+        self.alliance_cursor.execute(
+            "UPDATE alliance_list SET refresh_rate = ? WHERE alliance_id = ?",
+            (int(refresh_seconds), alliance_id),
+        )
+        self.alliance_conn.commit()
+
+    async def show_auto_redemption_settings_picker(self, interaction: discord.Interaction):
+        """Step E: entry point for Automatic Redemption Settings.
+
+        Called from the Other Features menu. Mod+ gate. Lists every alliance for this
+        guild with its current automatic-flow settings, then a dropdown lets you pick
+        one to edit.
+        """
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            try:
+                await interaction.response.send_message(
+                    "❌ Only mods, admins, or the bot owner can change Automatic Redemption Settings.",
+                    ephemeral=True,
+                )
+            except discord.InteractionResponded:
+                await interaction.followup.send(
+                    "❌ Only mods, admins, or the bot owner can change Automatic Redemption Settings.",
+                    ephemeral=True,
+                )
+            return
+
+        try:
+            alliances = self.get_auto_redemption_alliances(interaction.guild_id)
+        except Exception as exc:
+            print(f"[ERROR] show_auto_redemption_settings_picker: failed to load alliances: {exc}")
+            traceback.print_exc()
+            embed = discord.Embed(
+                title="❌ Could Not Load Alliances",
+                description=f"Something went wrong:\n```{str(exc)[:900]}```",
+                color=discord.Color.red(),
+            )
+            if not interaction.response.is_done():
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        if not alliances:
+            embed = discord.Embed(
+                title="⚙️ Automatic Redemption Settings",
+                description="No alliances are registered for this server yet.",
+                color=discord.Color.blurple(),
+            )
+            if not interaction.response.is_done():
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        # Build a summary listing so the user can see current values at a glance.
+        lines = []
+        for alliance in alliances[:25]:
+            gift_ch = f"<#{alliance['gift_code_channel_id']}>" if alliance['gift_code_channel_id'] else "`Not set`"
+            rep_ch = f"<#{alliance['results_channel_id']}>" if alliance['results_channel_id'] else "`Not set`"
+            rate = self.format_refresh_rate_seconds(alliance['refresh_rate'])
+            lines.append(
+                f"**{alliance['name']}**\n"
+                f"\u2003• Gift Code Channel: {gift_ch}\n"
+                f"\u2003• Report Channel: {rep_ch}\n"
+                f"\u2003• Refresh Rate: {rate}"
+            )
+
+        embed = discord.Embed(
+            title="⚙️ Automatic Redemption Settings — Select Alliance",
+            description=(
+                "Pick an alliance to change its **automatic** redemption settings.\n"
+                "Each alliance keeps its own gift code channel, report channel, and refresh rate.\n\n"
+                + "\n\n".join(lines)
+            )[:4000],
+            color=discord.Color.blurple(),
+        )
+        view = AutoRedemptionAlliancePickerView(self, alliances)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+    async def show_auto_redemption_alliance_settings(self, interaction: discord.Interaction, alliance_id):
+        """Step E: show the per-alliance settings view after picking an alliance."""
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can change Automatic Redemption Settings.",
+                ephemeral=True,
+            )
+            return
+
+        alliance = self.get_auto_redemption_alliance(alliance_id)
+        if not alliance:
+            await interaction.response.edit_message(
+                content="❌ Alliance not found.", embed=None, view=None
+            )
+            return
+
+        embed = self._build_alliance_settings_embed(alliance)
+        view = AutoRedemptionAllianceSettingsView(self, alliance_id, alliance['name'])
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    def _build_alliance_settings_embed(self, alliance):
+        """Step E: shared embed renderer for one alliance's current automatic-flow settings."""
+        gift_ch = f"<#{alliance['gift_code_channel_id']}>" if alliance['gift_code_channel_id'] else "`Not set`"
+        rep_ch = f"<#{alliance['results_channel_id']}>" if alliance['results_channel_id'] else "`Not set`"
+        rate = self.format_refresh_rate_seconds(alliance['refresh_rate'])
+        embed = discord.Embed(
+            title=f"⚙️ Automatic Redemption — {alliance['name']}",
+            description=(
+                "These settings control **only the automatic flow** for this alliance "
+                "(scheduled scans + Retry Automatic Redemption). Manual gift code redemption "
+                "is unaffected."
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Gift Code Channel", value=gift_ch, inline=False)
+        embed.add_field(name="Report Channel", value=rep_ch, inline=False)
+        embed.add_field(name="Refresh Rate", value=rate, inline=False)
+        return embed
+
+    async def save_alliance_gift_code_channel(self, interaction: discord.Interaction, alliance_id, channel):
+        """Step E: persist gift_code_channel for one alliance, then refresh the settings view."""
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can use this feature.", ephemeral=True
+            )
+            return
+        try:
+            self.set_alliance_gift_code_channel(alliance_id, channel.id)
+        except Exception as exc:
+            print(f"[ERROR] save_alliance_gift_code_channel: {exc}")
+            traceback.print_exc()
+            await interaction.response.edit_message(
+                content=f"❌ Failed to save gift code channel:\n```{str(exc)[:900]}```",
+                embed=None,
+                view=None,
+            )
+            return
+        alliance = self.get_auto_redemption_alliance(alliance_id)
+        embed = self._build_alliance_settings_embed(alliance)
+        embed.set_footer(text=f"✅ Gift Code Channel updated to #{channel.name}")
+        view = AutoRedemptionAllianceSettingsView(self, alliance_id, alliance['name'])
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def save_alliance_results_channel(self, interaction: discord.Interaction, alliance_id, channel):
+        """Step E: persist results_channel for one alliance, then refresh the settings view."""
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can use this feature.", ephemeral=True
+            )
+            return
+        try:
+            self.set_alliance_results_channel(alliance_id, channel.id)
+        except Exception as exc:
+            print(f"[ERROR] save_alliance_results_channel: {exc}")
+            traceback.print_exc()
+            await interaction.response.edit_message(
+                content=f"❌ Failed to save report channel:\n```{str(exc)[:900]}```",
+                embed=None,
+                view=None,
+            )
+            return
+        alliance = self.get_auto_redemption_alliance(alliance_id)
+        embed = self._build_alliance_settings_embed(alliance)
+        embed.set_footer(text=f"✅ Report Channel updated to #{channel.name}")
+        view = AutoRedemptionAllianceSettingsView(self, alliance_id, alliance['name'])
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def save_alliance_refresh_rate(self, interaction: discord.Interaction, alliance_id, refresh_seconds, label):
+        """Step E: persist refresh_rate for one alliance, then refresh the settings view."""
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can use this feature.", ephemeral=True
+            )
+            return
+        try:
+            self.set_alliance_refresh_rate(alliance_id, refresh_seconds)
+        except Exception as exc:
+            print(f"[ERROR] save_alliance_refresh_rate: {exc}")
+            traceback.print_exc()
+            await interaction.response.edit_message(
+                content=f"❌ Failed to save refresh rate:\n```{str(exc)[:900]}```",
+                embed=None,
+                view=None,
+            )
+            return
+        alliance = self.get_auto_redemption_alliance(alliance_id)
+        embed = self._build_alliance_settings_embed(alliance)
+        embed.set_footer(text=f"✅ Refresh Rate updated to {label}")
+        view = AutoRedemptionAllianceSettingsView(self, alliance_id, alliance['name'])
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    # ---- end Step E helpers ----
+
     async def show_auto_gift_settings(self, interaction: discord.Interaction):
         if not check_permission(interaction.user.id, interaction.guild_id, "admin"):
             await interaction.response.send_message("❌ Only admins or the bot owner can use this feature.", ephemeral=True)
@@ -2775,6 +3076,243 @@ class CreateGiftCodeModal(discord.ui.Modal, title="Create Gift Code"):
             traceback.print_exc()
             if not interaction.response.is_done():
                 await interaction.response.send_message("❌ An error occurred while loading alliances.", ephemeral=True)
+
+# ---- Step E: Automatic Redemption Settings views ----
+
+class AutoRedemptionAlliancePickerView(discord.ui.View):
+    """Step E: alliance picker for Automatic Redemption Settings (Other Features)."""
+    def __init__(self, cog, alliances):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.add_item(AutoRedemptionAllianceSelect(cog, alliances))
+
+
+class AutoRedemptionAllianceSelect(discord.ui.Select):
+    def __init__(self, cog, alliances):
+        self.cog = cog
+        self.alliance_names = {str(a['alliance_id']): a['name'] for a in alliances[:25]}
+        options = []
+        for alliance in alliances[:25]:
+            gift_set = "✅" if alliance['gift_code_channel_id'] else "❌"
+            rep_set = "✅" if alliance['results_channel_id'] else "❌"
+            rate_set = "✅" if alliance['refresh_rate'] else "❌"
+            options.append(
+                discord.SelectOption(
+                    label=alliance['name'][:100],
+                    value=str(alliance['alliance_id']),
+                    description=f"Gift {gift_set}  Report {rep_set}  Rate {rate_set}"[:100],
+                )
+            )
+        super().__init__(
+            placeholder="Select an alliance to configure",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can change Automatic Redemption Settings.",
+                ephemeral=True,
+            )
+            return
+        alliance_id = int(self.values[0])
+        await self.cog.show_auto_redemption_alliance_settings(interaction, alliance_id)
+
+
+class AutoRedemptionAllianceSettingsView(discord.ui.View):
+    """Step E: per-alliance settings view with 3 setting buttons + Back."""
+    def __init__(self, cog, alliance_id, alliance_name):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+
+    @discord.ui.button(
+        label="Set Gift Code Channel",
+        emoji="📥",
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
+    async def set_gift_code_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can use this feature.", ephemeral=True
+            )
+            return
+        embed = discord.Embed(
+            title=f"📥 Set Gift Code Channel — {self.alliance_name}",
+            description="Pick the text channel the bot should watch for new gift codes.",
+            color=discord.Color.blurple(),
+        )
+        view = AutoRedemptionGiftCodeChannelSelectView(self.cog, self.alliance_id, self.alliance_name)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    @discord.ui.button(
+        label="Set Report Channel",
+        emoji="📊",
+        style=discord.ButtonStyle.primary,
+        row=0,
+    )
+    async def set_report_channel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can use this feature.", ephemeral=True
+            )
+            return
+        embed = discord.Embed(
+            title=f"📊 Set Report Channel — {self.alliance_name}",
+            description="Pick the text channel where redemption reports should be posted.",
+            color=discord.Color.blurple(),
+        )
+        view = AutoRedemptionReportChannelSelectView(self.cog, self.alliance_id, self.alliance_name)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    @discord.ui.button(
+        label="Set Refresh Rate",
+        emoji="⏱️",
+        style=discord.ButtonStyle.primary,
+        row=1,
+    )
+    async def set_refresh_rate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can use this feature.", ephemeral=True
+            )
+            return
+        embed = discord.Embed(
+            title=f"⏱️ Set Refresh Rate — {self.alliance_name}",
+            description=(
+                "Pick how often the automatic scheduler should scan this alliance's "
+                "gift code channel and run redemptions."
+            ),
+            color=discord.Color.blurple(),
+        )
+        view = AutoRedemptionRefreshRateSelectView(self.cog, self.alliance_id, self.alliance_name)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    @discord.ui.button(
+        label="Back",
+        emoji="🔙",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_auto_redemption_settings_picker(interaction)
+
+
+class AutoRedemptionGiftCodeChannelSelectView(discord.ui.View):
+    """Step E: channel picker that saves gift_code_channel for one alliance."""
+    def __init__(self, cog, alliance_id, alliance_name):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+        self.add_item(AutoRedemptionGiftCodeChannelSelect(cog, alliance_id, alliance_name))
+
+
+class AutoRedemptionGiftCodeChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog, alliance_id, alliance_name):
+        super().__init__(
+            placeholder="Select gift code channel",
+            min_values=1,
+            max_values=1,
+            channel_types=[discord.ChannelType.text],
+        )
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+
+    async def callback(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can use this feature.", ephemeral=True
+            )
+            return
+        channel = self.values[0]
+        await self.cog.save_alliance_gift_code_channel(interaction, self.alliance_id, channel)
+
+
+class AutoRedemptionReportChannelSelectView(discord.ui.View):
+    """Step E: channel picker that saves results_channel for one alliance."""
+    def __init__(self, cog, alliance_id, alliance_name):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+        self.add_item(AutoRedemptionReportChannelSelect(cog, alliance_id, alliance_name))
+
+
+class AutoRedemptionReportChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog, alliance_id, alliance_name):
+        super().__init__(
+            placeholder="Select report channel",
+            min_values=1,
+            max_values=1,
+            channel_types=[discord.ChannelType.text],
+        )
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+
+    async def callback(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can use this feature.", ephemeral=True
+            )
+            return
+        channel = self.values[0]
+        await self.cog.save_alliance_results_channel(interaction, self.alliance_id, channel)
+
+
+class AutoRedemptionRefreshRateSelectView(discord.ui.View):
+    """Step E: dropdown to pick a friendly refresh rate; converts to seconds."""
+    def __init__(self, cog, alliance_id, alliance_name):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+        self.add_item(AutoRedemptionRefreshRateSelect(cog, alliance_id, alliance_name))
+
+
+class AutoRedemptionRefreshRateSelect(discord.ui.Select):
+    def __init__(self, cog, alliance_id, alliance_name):
+        self.cog = cog
+        self.alliance_id = alliance_id
+        self.alliance_name = alliance_name
+        options = [
+            discord.SelectOption(
+                label=label,
+                value=str(seconds),
+                description=f"{seconds} seconds",
+            )
+            for label, seconds in GiftOperations.AUTO_REFRESH_RATE_PRESETS
+        ]
+        super().__init__(
+            placeholder="Select refresh rate",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not check_permission(interaction.user.id, interaction.guild_id, "mod"):
+            await interaction.response.send_message(
+                "❌ Only mods, admins, or the bot owner can use this feature.", ephemeral=True
+            )
+            return
+        seconds = int(self.values[0])
+        # Find the matching preset label for the success footer.
+        label = next(
+            (lbl for lbl, sec in GiftOperations.AUTO_REFRESH_RATE_PRESETS if sec == seconds),
+            f"{seconds}s",
+        )
+        await self.cog.save_alliance_refresh_rate(interaction, self.alliance_id, seconds, label)
+
+
+# ---- end Step E views ----
+
 
 async def setup(bot):
     await bot.add_cog(GiftOperations(bot))
