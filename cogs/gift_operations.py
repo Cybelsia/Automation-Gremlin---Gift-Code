@@ -295,16 +295,21 @@ class GiftOperations(commands.Cog):
         ]
         return dict(zip(columns, row))
 
-    def should_skip_code_for_alliance(self, gift_code: str, alliance_id: int) -> bool:
+    def should_skip_code_for_alliance(self, gift_code: str, alliance_id: int, force_manual: bool = False) -> bool:
         """Decide whether the scheduler should skip this (code, alliance) on the current tick.
 
-        Step 2 rules:
+        Step 2 rules (force_manual=False):
           - No row at all              -> do not skip (fresh attempt).
           - auto_succeeded             -> skip (already redeemed).
           - manual_accepted/rejected   -> skip (mod handled it).
           - needs_manual               -> skip (mod will handle via manual queue).
           - auto_failed_1 + cooldown still active  -> skip.
           - auto_failed_1 + cooldown expired       -> do not skip (eligible for second attempt).
+
+        Step B2 rules (force_manual=True, used by Retry Automatic Redemption button):
+          - Terminal statuses still skip (auto_succeeded / manual_* / needs_manual).
+          - auto_failed_1 is ALWAYS eligible regardless of cooldown. Risk: bad codes get
+            their second attempt instantly burned and escalated to needs_manual.
         """
         job = self.get_gift_code_job(gift_code, alliance_id)
         if job is None:
@@ -316,6 +321,8 @@ class GiftOperations(commands.Cog):
             return True
 
         if status == "auto_failed_1":
+            if force_manual:
+                return False  # manual trigger bypasses cooldown
             next_attempt_at = job.get("next_attempt_at")
             if not next_attempt_at:
                 # No cooldown recorded; treat as eligible for retry.
@@ -448,11 +455,12 @@ class GiftOperations(commands.Cog):
             print(f"[SCHEDULER] Error in alliance_scheduler: {e}")
             traceback.print_exc()
 
-    async def _run_alliance_scheduler_once(self, alliance_row):
+    async def _run_alliance_scheduler_once(self, alliance_row, force_manual: bool = False):
         """Run one scheduler pass for ONE alliance. Extracted from _run_alliance_scheduler so
         it can be invoked on-demand by the manual 'Retry Automatic Redemption' button.
 
         alliance_row = (alliance_id, name, guild_id, refresh_rate, gift_channel_id, results_channel_id)
+        force_manual: when True, bypasses the 24h auto_failed_1 cooldown (mod is forcing a retry).
 
         Returns a dict summary so callers (e.g. the manual trigger UI) can show a result embed.
         Returns None if the alliance was skipped before any redemption work happened
@@ -490,7 +498,7 @@ class GiftOperations(commands.Cog):
             # This stops the bot from re-attempting the same code every cycle.
             unprocessed_codes = [
                 c for c in found_codes
-                if not self.should_skip_code_for_alliance(c, alliance_id)
+                if not self.should_skip_code_for_alliance(c, alliance_id, force_manual=force_manual)
             ]
             skipped_already_processed = len(found_codes) - len(unprocessed_codes)
             if skipped_already_processed:
