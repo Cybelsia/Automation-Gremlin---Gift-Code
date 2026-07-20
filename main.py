@@ -156,6 +156,7 @@ COGS = [
     "cogs.changes",
     "cogs.control",
     "cogs.gift_operations",
+    "cogs.gift_operations_kingshot",
     "cogs.id_channel",
     "cogs.logsystem",
     "cogs.other_features",

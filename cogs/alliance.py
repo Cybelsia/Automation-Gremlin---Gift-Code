@@ -301,6 +301,14 @@ class SettingsMenuView(discord.ui.View):
         else:
             await self._missing_cog(interaction, "Gift Code Operations")
 
+    @discord.ui.button(label="Kingshot Gift Operations", emoji="🎮", style=discord.ButtonStyle.primary, row=1)
+    async def kingshot_gift_operations_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = self.cog.bot.get_cog("GiftOperationsKingshot")
+        if cog:
+            await cog.show_create_gift_code_modal(interaction)
+        else:
+            await self._missing_cog(interaction, "Kingshot Gift Operations")
+
     @discord.ui.button(label="Other Features", emoji="🔧", style=discord.ButtonStyle.secondary, row=2)
     async def other_features_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = self.cog.bot.get_cog("OtherFeatures")
